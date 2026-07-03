@@ -1,0 +1,12 @@
+faster-whisper>=1.0.0
+PyAudioWPatch>=0.2.12.7
+numpy
+fastapi
+uvicorn[standard]
+openai>=1.40.0
+anthropic>=0.40.0
+python-dotenv
+PyYAML
+PySide6
+pynput
+httpx

@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interview Copilot</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b23; --panel2: #1c232e; --border: #2a3342;
+    --text: #dbe2ec; --dim: #8b98ab; --accent: #4f8ef7; --me: #34c98e;
+    --int: #f2b84b; --err: #f26d6d; --rec: #e5484d;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.5 "Segoe UI", system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 15px; font-weight: 600; margin-right: auto; }
+  select, button, input { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 7px 12px; font: inherit; }
+  button { cursor: pointer; } button:hover { border-color: var(--accent); }
+  #providers { font-size: 12px; color: var(--dim); }
+  main { flex: 1; display: grid; grid-template-columns: minmax(280px, 1fr) minmax(380px, 1.4fr); gap: 10px; padding: 10px; overflow: hidden; }
+  .pane { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; }
+  .pane h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  .scroll { flex: 1; overflow-y: auto; padding: 12px 14px; }
+  .line { margin-bottom: 10px; }
+  .chip { display: inline-block; font-size: 11px; font-weight: 700; border-radius: 5px; padding: 1px 7px; margin-right: 8px; vertical-align: 1px; }
+  .chip.int { background: rgba(242,184,75,.15); color: var(--int); }
+  .chip.me  { background: rgba(52,201,142,.15); color: var(--me); }
+  .card { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+  .card .q { color: var(--int); font-weight: 600; margin-bottom: 8px; }
+  .card .provider { font-size: 11px; color: var(--dim); margin-top: 8px; }
+  .card .a { white-space: normal; word-wrap: break-word; }
+  .card .a code { background: #10141a; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; font-size: 13px; }
+  .card .a pre { background: #10141a; border: 1px solid var(--border); border-radius: 8px; padding: 10px; overflow-x: auto; margin: 6px 0; }
+  .card .a ul { padding-left: 20px; margin: 4px 0; }
+  .card.error .a { color: var(--err); }
+  footer { padding: 10px 16px; background: var(--panel); border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
+  #recRow { display: flex; align-items: center; gap: 14px; }
+  #recBtn { font-size: 16px; font-weight: 700; padding: 12px 28px; border-radius: 12px; border: 2px solid var(--accent); background: rgba(79,142,247,.12); min-width: 260px; }
+  #recBtn.rec { border-color: var(--rec); background: rgba(229,72,77,.15); animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 6px rgba(229,72,77,.12); } }
+  #timer { font-variant-numeric: tabular-nums; font-size: 18px; color: var(--dim); min-width: 60px; }
+  #status { font-size: 12px; color: var(--dim); margin-left: auto; text-align: right; }
+  #status.error { color: var(--err); }
+  #manualRow { display: flex; gap: 8px; }
+  #manualRow input { flex: 1; }
+  .hint { font-size: 11px; color: var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎯 Interview Copilot</h1>
+  <span id="providers">connecting…</span>
+  <label class="hint">Profile</label>
+  <select id="profile"></select>
+  <button id="clearBtn" title="Forget this session's history">Clear session</button>
+</header>
+
+<main>
+  <section class="pane">
+    <h2>Transcript</h2>
+    <div class="scroll" id="transcript"></div>
+  </section>
+  <section class="pane">
+    <h2>AI answers</h2>
+    <div class="scroll" id="answers"></div>
+  </section>
+</main>
+
+<footer>
+  <div id="recRow">
+    <button id="recBtn">● Start recording</button>
+    <span id="timer">0:00</span>
+    <span class="hint">Space = start/stop&nbsp;·&nbsp;captures interviewer (system audio) + you (mic)</span>
+    <span id="status">…</span>
+  </div>
+  <div id="manualRow">
+    <input id="manualText" placeholder="Type instead of recording…" autocomplete="off">
+    <button id="askBtn" title="Send as the interviewer's question">Interviewer asked</button>
+    <button id="sayBtn" title="Send as something you said">I said</button>
+  </div>
+</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+let ws, recording = false, recT0 = 0, timerIv = null;
+const cards = {}; // qid -> {card, a, raw}
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = e => handle(JSON.parse(e.data));
+  ws.onclose = () => { setStatus("disconnected — retrying…", true); setTimeout(connect, 1500); };
+  ws.onopen = () => setStatus("connected");
+}
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+function setStatus(t, err) { const s = $("status"); s.textContent = t; s.className = err ? "error" : ""; }
+
+// minimal offline markdown: bold, inline code, fenced code, bullets
+function esc(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function md(s) {
+  let h = esc(s);
+  h = h.replace(/```(\w*)\n([\s\S]*?)```/g, (_, l, c) => `<pre><code>${c}</code></pre>`);
+  h = h.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  h = h.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+  const lines = h.split("\n"); let out = "", inUl = false;
+  for (const ln of lines) {
+    const m = ln.match(/^\s*[-*•]\s+(.*)/);
+    if (m) { if (!inUl) { out += "<ul>"; inUl = true; } out += `<li>${m[1]}</li>`; }
+    else {
+      if (inUl) { out += "</ul>"; inUl = false; }
+      out += ln.startsWith("<pre>") ? ln : ln + "<br>";
+    }
+  }
+  if (inUl) out += "</ul>";
+  return out;
+}
+
+function addTranscript(speaker, text) {
+  const d = document.createElement("div");
+  d.className = "line";
+  d.innerHTML = `<span class="chip ${speaker === "me" ? "me" : "int"}">${speaker === "me" ? "ME" : "INTERVIEWER"}</span>${esc(text)}`;
+  $("transcript").appendChild(d);
+  $("transcript").scrollTop = 1e9;
+}
+
+function handle(m) {
+  switch (m.type) {
+    case "hello": {
+      $("providers").textContent = m.providers.length ? "LLM: " + m.providers.join(" → ") : "⚠ no LLM key in .env";
+      const sel = $("profile"); sel.innerHTML = "";
+      m.profiles.forEach(p => { const o = document.createElement("option"); o.value = p.id; o.textContent = p.name; sel.appendChild(o); });
+      sel.value = m.active_profile;
+      $("transcript").innerHTML = "";
+      (m.transcript || []).forEach(t => addTranscript(t.speaker, t.text));
+      setRec(m.recording);
+      break;
+    }
+    case "status": setStatus(m.text, m.level === "error"); break;
+    case "devices": break;
+    case "recording": setRec(m.on); break;
+    case "transcript": addTranscript(m.speaker, m.text); break;
+    case "answer_start": {
+      const card = document.createElement("div"); card.className = "card";
+      card.innerHTML = `<div class="q">${esc(m.question || "")}</div><div class="a"></div><div class="provider"></div>`;
+      $("answers").prepend(card);
+      cards[m.qid] = { card, a: card.querySelector(".a"), p: card.querySelector(".provider"), raw: "" };
+      break;
+    }
+    case "answer_delta": {
+      const c = cards[m.qid]; if (!c) break;
+      c.raw += m.text; c.a.innerHTML = md(c.raw);
+      if (m.provider) c.p.textContent = "via " + m.provider;
+      break;
+    }
+    case "answer_error": {
+      const c = cards[m.qid]; if (!c) break;
+      c.card.classList.add("error");
+      c.a.innerHTML += `<br><b>Error:</b> ${esc(m.text)}`;
+      break;
+    }
+    case "answer_done": break;
+    case "cleared": $("transcript").innerHTML = ""; $("answers").innerHTML = ""; break;
+  }
+}
+
+function setRec(on) {
+  recording = on;
+  const b = $("recBtn");
+  b.className = on ? "rec" : "";
+  b.textContent = on ? "■ Stop → get answer" : "● Start recording";
+  clearInterval(timerIv);
+  if (on) {
+    recT0 = Date.now();
+    timerIv = setInterval(() => {
+      const s = Math.floor((Date.now() - recT0) / 1000);
+      $("timer").textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+    }, 250);
+  } else $("timer").textContent = "0:00";
+}
+
+$("recBtn").onclick = () => send({ type: recording ? "record_stop" : "record_start" });
+$("clearBtn").onclick = () => send({ type: "clear" });
+$("profile").onchange = e => send({ type: "set_profile", name: e.target.value });
+function sendManual(kind) {
+  const v = $("manualText").value.trim();
+  if (!v) return;
+  send({ type: kind, text: v });
+  $("manualText").value = "";
+}
+$("askBtn").onclick = () => sendManual("ask");
+$("sayBtn").onclick = () => sendManual("say");
+$("manualText").addEventListener("keydown", e => { if (e.key === "Enter") sendManual("ask"); });
+document.addEventListener("keydown", e => {
+  if (e.code === "Space" && document.activeElement !== $("manualText")) {
+    e.preventDefault();
+    $("recBtn").click();
+  }
+});
+
+connect();
+</script>
+</body>
+</html>
