@@ -36,18 +36,22 @@ def _wav_bytes(audio: np.ndarray) -> bytes:
 
 
 class LocalSTT:
-    def __init__(self, model="base", language="en"):
-        import numpy as _np
+    """Offline faster-whisper, CPU only. Default model base.en — the accuracy/
+    latency sweet spot on CPU (~0.7s for a short clip) and portable to any
+    laptop (no GPU/CUDA, no API key). The model is loaded + warmed at init."""
+
+    def __init__(self, model="base.en", language="en"):
         from faster_whisper import WhisperModel
         self.language = language or None
         self.lock = threading.Lock()
+        self.model = WhisperModel(model, device="cpu", compute_type="int8")
+        self.device = "cpu"
+        # warm up so the first real transcription isn't slow
         try:
-            self.model = WhisperModel(model, device="cuda", compute_type="float16")
-            list(self.model.transcribe(_np.zeros(16000, _np.float32), beam_size=1)[0])
-            self.device = "cuda"
+            list(self.model.transcribe(np.zeros(8000, np.float32),
+                                       language=self.language, beam_size=1)[0])
         except Exception:
-            self.model = WhisperModel(model, device="cpu", compute_type="int8")
-            self.device = "cpu"
+            pass
 
     def transcribe(self, audio: np.ndarray) -> str:
         with self.lock:
@@ -166,11 +170,7 @@ class SttChain:
 
 
 def make_stt(cfg: dict):
+    """STT is fixed to local CPU Whisper (base.en) — offline, no API key,
+    portable. The cloud STT classes above are kept for reference but unused."""
     cfg = cfg or {}
-    language = cfg.get("language", "en")
-    providers = cfg.get("providers")
-    if not providers:   # migrate legacy single-provider config
-        legacy = cfg.get("provider", "local")
-        providers = [{"name": legacy, "api_type": legacy if legacy in ("local", "gemini") else "openai",
-                      "model": cfg.get("model", "base"), "enabled": True}]
-    return SttChain(providers, language=language)
+    return LocalSTT(model=cfg.get("model", "base.en"), language=cfg.get("language", "en"))

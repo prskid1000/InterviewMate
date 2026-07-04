@@ -21,7 +21,7 @@ from PySide6.QtGui import (
     QBrush, QColor, QLinearGradient, QMouseEvent, QPainter, QPainterPath, QPen,
 )
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from .config import CFG
@@ -79,38 +79,45 @@ def _md_html(s: str) -> str:
 
 
 class AnswerView(QWidget):
-    """Embedded answer stream (no window chrome — it lives inside the Hud).
+    """Live chat transcript inside the Hud: interviewer / you / AI messages as
+    color-coded bubbles in order. Transcription streams in live; the AI answer
+    updates its bubble token-by-token."""
 
-    Same continuous-session rendering as before, minus the frame/drag/resize:
-    the Hud owns the window, this just paints the streamed answer."""
+    _MAXW = 0.82   # bubble max width as a fraction of the viewport
+    # speaker -> (tag, tag color, bubble bg, right-aligned?)
+    _ROLES = {
+        "interviewer": ("INTERVIEWER", "#f2b84b", "rgba(242,184,75,0.13)", False),
+        "me":          ("YOU",         "#34d89e", "rgba(52,201,142,0.15)", True),
+        "ai":          ("AI",          "#a78bfa", "rgba(167,139,250,0.14)", False),
+    }
 
     def __init__(self):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 8, 16, 12)
-        lay.setSpacing(7)
+        lay.setContentsMargins(12, 6, 12, 10)
+        lay.setSpacing(6)
 
-        self._hdr = QLabel("AI answers")
+        self._hdr = QLabel("Live transcript")
         self._hdr.setStyleSheet(
             "color:#5b6a86; font:600 10px 'Segoe UI'; letter-spacing:0.06em; background:transparent;")
         lay.addWidget(self._hdr)
 
-        # status / backend-error line (shown above the answer body)
         self._status = QLabel()
         self._status.setWordWrap(True)
         self._status.setVisible(False)
         lay.addWidget(self._status)
 
-        self._body = QLabel()
-        self._body.setWordWrap(True)
-        self._body.setTextFormat(Qt.TextFormat.RichText)
-        self._body.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._body.setStyleSheet("color:#dbe2ec; font:13px 'Segoe UI'; background:transparent;")
+        self._feed = QWidget()
+        self._feed.setStyleSheet("background:transparent;")
+        self._feedlay = QVBoxLayout(self._feed)
+        self._feedlay.setContentsMargins(0, 0, 0, 0)
+        self._feedlay.setSpacing(8)
+        self._feedlay.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self._scroll = QScrollArea()
-        self._scroll.setWidget(self._body)
+        self._scroll.setWidget(self._feed)
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         self._scroll.setStyleSheet(
@@ -121,23 +128,125 @@ class AnswerView(QWidget):
         self._scroll.viewport().setStyleSheet("background:transparent;")
         lay.addWidget(self._scroll, 1)
 
-        self._foot = QLabel()
-        self._foot.setStyleSheet("color:#8a96aa; font:10px 'Segoe UI'; background:transparent;")
-        lay.addWidget(self._foot)
-
-        self._committed = ""      # HTML of finished Q&As this session
-        self._cur_q = ""
-        self._raw = ""
+        self._bubbles: list[QFrame] = []   # for width updates on resize
+        self._ai_body = None               # current streaming AI bubble label
+        self._ai_tag = None
+        self._ai_raw = ""
         self._dirty = False
         self._render = QTimer(self)
         self._render.setInterval(120)
         self._render.timeout.connect(self._flush)
 
-    # streaming (Qt thread) --------------------------------------------
+    # bubbles -----------------------------------------------------------
+
+    def _make_bubble(self, speaker: str, text: str, rich: bool):
+        name, tagcolor, bg, right = self._ROLES.get(speaker, self._ROLES["ai"])
+        row = QWidget()
+        h = QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(0)
+        bub = QFrame()
+        bub.setStyleSheet(f"background:{bg}; border-radius:11px;")
+        bv = QVBoxLayout(bub); bv.setContentsMargins(12, 7, 12, 9); bv.setSpacing(3)
+        tag = QLabel(name)
+        tag.setStyleSheet(f"color:{tagcolor}; font:700 9px 'Segoe UI'; "
+                          "letter-spacing:0.08em; background:transparent;")
+        body = QLabel()
+        body.setWordWrap(True)
+        body.setTextFormat(Qt.TextFormat.RichText if rich else Qt.TextFormat.PlainText)
+        body.setStyleSheet("color:#e7edf6; font:13px 'Segoe UI'; background:transparent;")
+        body.setText(_md_html(text) if rich else text)
+        bv.addWidget(tag); bv.addWidget(body)
+        if right:
+            h.addStretch(1); h.addWidget(bub)
+        else:
+            h.addWidget(bub); h.addStretch(1)
+        self._bubbles.append(bub)
+        self._feedlay.addWidget(row)
+        self._apply_width(bub)
+        return tag, body
+
+    def _apply_width(self, bub):
+        w = int(self._scroll.viewport().width() * self._MAXW)
+        if w > 60:
+            bub.setMaximumWidth(w)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        for b in self._bubbles:
+            self._apply_width(b)
+
+    def _scroll_bottom(self):
+        QTimer.singleShot(0, lambda: self._scroll.verticalScrollBar().setValue(
+            self._scroll.verticalScrollBar().maximum()))
+
+    # events (Qt thread) -----------------------------------------------
+
+    def add_message(self, speaker: str, text: str):
+        """A live transcript line (interviewer / me) — a new bubble."""
+        if not text:
+            return
+        self._make_bubble(speaker, text, rich=(speaker == "ai"))
+        self._scroll_bottom()
+
+    def begin(self, question: str = ""):
+        """Start a fresh AI bubble that streams token-by-token."""
+        self.set_status("")
+        self._ai_raw = ""
+        self._ai_tag, self._ai_body = self._make_bubble("ai", "", rich=True)
+        self._ai_body.setText("<i style='color:#8a96aa'>thinking…</i>")
+        self._render.start()
+        self._scroll_bottom()
+
+    def add(self, delta: str, provider: str | None):
+        self._ai_raw += delta
+        self._dirty = True
+        if provider and self._ai_tag is not None:
+            self._ai_tag.setText(f"AI · {provider}")
+
+    def finish(self):
+        self._render.stop()
+        if self._ai_body is not None:
+            self._ai_body.setText(_md_html(self._ai_raw)
+                                  or "<i style='color:#8a96aa'>(no answer)</i>")
+        self._ai_body = self._ai_tag = None
+        self._scroll_bottom()
+
+    def error(self, text: str):
+        if self._ai_body is not None:
+            self._ai_raw += f"\n**Error:** {text}"
+            self._ai_body.setText(_md_html(self._ai_raw))
+            self._render.stop()
+            self._ai_body = self._ai_tag = None
+        else:
+            self.set_status(text, error=True)
+
+    def reset(self):
+        self._render.stop()
+        while self._feedlay.count():
+            it = self._feedlay.takeAt(0)
+            w = it.widget()
+            if w:
+                w.deleteLater()
+        self._bubbles = []
+        self._ai_body = self._ai_tag = None
+        self._ai_raw = ""
+        self.set_status("")
+
+    def load_transcript(self, msgs):
+        """Rebuild the whole feed from a session's message log (on tab switch)."""
+        self.reset()
+        for m in msgs or []:
+            sp, tx = m.get("speaker"), m.get("text", "")
+            if sp and tx:
+                self._make_bubble(sp, tx, rich=(sp == "ai"))
+        self._scroll_bottom()
+
+    def _flush(self):
+        if self._dirty and self._ai_body is not None:
+            self._dirty = False
+            self._ai_body.setText(_md_html(self._ai_raw))
+            self._scroll_bottom()
 
     def set_status(self, text: str, error: bool = False):
-        """Show a transient backend/status line (e.g. 'Transcribing…' or a
-        clear backend error). Empty text hides it."""
         if not text:
             self._status.setVisible(False)
             return
@@ -146,79 +255,6 @@ class AnswerView(QWidget):
             f"color:{color}; font:{'600 ' if error else ''}11px 'Segoe UI'; background:transparent;")
         self._status.setText(text)
         self._status.setVisible(True)
-
-    def reset(self):
-        """New session — wipe the accumulated conversation."""
-        self._committed = ""
-        self._cur_q = ""
-        self._raw = ""
-        self._body.setText("")
-        self._foot.setText("")
-        self.set_status("")
-
-    def begin(self, question: str):
-        self._commit()                 # fold the previous answer into history
-        self._cur_q = question
-        self._raw = ""
-        self.set_status("")            # clear any stale status once an answer starts
-        self._render.start()
-        self._render_now(thinking=True)
-
-    def add(self, delta: str, provider: str | None):
-        self._raw += delta
-        self._dirty = True
-        if provider:
-            self._foot.setText(f"via {provider}")
-
-    def finish(self):
-        self._commit()
-        self._render_now()
-        self._render.stop()
-
-    def error(self, text: str):
-        self._raw += f"\n**Error:** {text}"
-        self._render_now()
-
-    def load_exchanges(self, exchanges):
-        """Rebuild the whole panel from a session's stored Q/A history (used
-        when switching tabs)."""
-        self._render.stop()
-        self._cur_q = ""
-        self._raw = ""
-        self.set_status("")
-        html_parts = []
-        for ex in exchanges or []:
-            html_parts.append(self._block(ex.get("qd", ""), ex.get("a", "")))
-            html_parts.append("<div style='border-top:1px solid #232c3a;margin:11px 0;'></div>")
-        self._committed = "".join(html_parts)
-        self._render_now()
-
-    def _commit(self):
-        if self._cur_q or self._raw.strip():
-            self._committed += self._block(self._cur_q, self._raw)
-            self._committed += "<div style='border-top:1px solid #232c3a;margin:11px 0;'></div>"
-        self._cur_q = ""
-        self._raw = ""
-
-    @staticmethod
-    def _block(q: str, raw: str) -> str:
-        head = (f"<div style='color:#f2b84b;font-weight:600;margin-bottom:4px;'>{html.escape(q)}</div>"
-                if q else "")
-        return head + _md_html(raw)
-
-    def _flush(self):
-        if self._dirty:
-            self._render_now()
-
-    def _render_now(self, thinking: bool = False):
-        self._dirty = False
-        if thinking and not self._raw:
-            cur = self._block(self._cur_q, "") + "<i style='color:#8a96aa'>thinking…</i>"
-        else:
-            cur = self._block(self._cur_q, self._raw) if (self._cur_q or self._raw) else ""
-        self._body.setText(self._committed + cur)
-        sb = self._scroll.verticalScrollBar()
-        sb.setValue(sb.maximum())
 
 
 class SessionTabs(QWidget):
@@ -359,8 +395,10 @@ class Hud(ResizableMixin, QWidget):
 
     def _on_event(self, m: dict):
         t = m.get("type")
-        if t == "recording":
-            self._set("recording" if m.get("on") else "processing")
+        if t == "transcript":
+            # live transcription line (interviewer / me) → a chat bubble
+            self._set_answer_expanded(True)
+            self.answer.add_message(m.get("speaker", ""), m.get("text", ""))
         elif t == "answer_start":
             self._set("answering")
             self._set_answer_expanded(True)        # an answer forces the panel open
@@ -380,7 +418,7 @@ class Hud(ResizableMixin, QWidget):
         elif t == "sessions":
             self.tabs.render(m.get("list", []), m.get("active", 0))
         elif t == "session_activated":
-            self.answer.load_exchanges(m.get("exchanges", []))
+            self.answer.load_transcript(m.get("transcript", []))
         elif t == "settings_applied":
             self._apply_overlay_cfg()
         elif t == "status":
@@ -527,7 +565,7 @@ class Hud(ResizableMixin, QWidget):
             "QMenu::item{padding:7px 22px 7px 12px;border-radius:5px;margin:1px 2px;}"
             "QMenu::item:selected{background:#1a2030;}"
             "QMenu::separator{height:1px;background:#1e2636;margin:4px 6px;}")
-        rec = menu.addAction("Stop recording" if self.co.recording else "Start recording")
+        rec = menu.addAction("Ask AI now")
         rec.triggered.connect(self._toggle_recording)
         ans = menu.addAction("Collapse answer" if self._answer_expanded else "Expand answer")
         ans.triggered.connect(self._toggle_answer)
@@ -544,7 +582,9 @@ class Hud(ResizableMixin, QWidget):
         menu.exec(e.globalPos())
 
     def _toggle_recording(self):
-        self.co.record_stop() if self.co.recording else self.co.record_start()
+        # continuous listening never stops — the hotkey/click just sends the
+        # current turn (interviewer question + my response) to the LLM.
+        self.co.ask_now()
 
     # painting ----------------------------------------------------------
 

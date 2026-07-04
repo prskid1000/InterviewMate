@@ -26,9 +26,8 @@ from .uikit import apply_capture_exclusion, load_state, save_state
 
 CONTEXT_DIR = ROOT / "context"
 
-SECTIONS = [("speech", "🎙   STT"), ("model", "🧠   AI Model"),
-            ("interview", "💬   Interview"), ("behavior", "🎛   Overlay & Audio"),
-            ("about", "⌨   Hotkeys")]
+SECTIONS = [("model", "🧠   AI Model"), ("interview", "💬   Interview"),
+            ("behavior", "🎛   Overlay & Audio"), ("about", "⌨   Hotkeys")]
 
 # Presets only PREFILL a new provider row — they are not a fixed chain.
 # Presets list only FREE-tier providers. Paid ones (OpenAI, Anthropic, …) are
@@ -45,7 +44,7 @@ STT_PRESETS = {
     "Custom…": ("openai", "", ""),
 }
 
-HK_ACTIONS = [("record_toggle", "Start / stop recording"),
+HK_ACTIONS = [("record_toggle", "Ask AI now (send to LLM)"),
               ("open_config", "Open settings window"),
               ("toggle_answer", "Show / hide answer card"),
               ("toggle_hud", "Show / hide HUD palette"),
@@ -407,7 +406,7 @@ class SettingsWindow(QWidget):
             self._sidebar.addItem(it)
         self._sidebar.currentRowChanged.connect(lambda i: self._stack.setCurrentIndex(i))
         self._stack = QStackedWidget()
-        for builder in (self._page_speech, self._page_model, self._page_interview,
+        for builder in (self._page_model, self._page_interview,
                         self._page_behavior, self._page_about):
             self._stack.addWidget(builder())
         bl.addWidget(self._sidebar); bl.addWidget(self._stack, 1)
@@ -426,22 +425,6 @@ class SettingsWindow(QWidget):
         fl.addWidget(close); fl.addWidget(save)
         root.addWidget(foot)
         self._sidebar.setCurrentRow(0)
-
-    def _page_speech(self):
-        scroll, lay = _page()
-        lay.addWidget(_title("STT",
-                             "Add any transcription provider — offline Whisper, any OpenAI-compatible "
-                             "audio endpoint, or Gemini. Tried top-first; first result wins."))
-        card, b = _card("Providers")
-        self.stt_editor = ProviderEditor(["openai", "gemini"], STT_PRESETS)
-        b.addWidget(self.stt_editor)
-        lay.addWidget(card)
-        adv = Collapsible("Advanced")
-        self.stt_lang = QLineEdit()
-        adv.add(_row("Language", self.stt_lang, "ISO code, e.g. en, hi."))
-        c2, b2 = _card("Options"); b2.addWidget(adv)
-        lay.addWidget(c2); lay.addStretch(1)
-        return scroll
 
     def _page_model(self):
         scroll, lay = _page()
@@ -669,10 +652,6 @@ class SettingsWindow(QWidget):
     # ── load / save ────────────────────────────────────────────────────
 
     def _load(self):
-        stt = CFG.get("stt", {}) or {}
-        self.stt_editor.load(stt.get("providers", []))
-        self.stt_lang.setText(stt.get("language", "en"))
-
         llm = CFG.get("llm", {}) or {}
         self.llm_editor.load(llm.get("providers", []))
         self.temperature.setValue(float(llm.get("temperature", 0.4)))
@@ -724,8 +703,6 @@ class SettingsWindow(QWidget):
 
     def _save(self):
         cfg = dict(CFG)
-        cfg["stt"] = {"language": self.stt_lang.text().strip() or "en",
-                      "providers": self.stt_editor.dump()}
         cfg["llm"] = {"providers": self.llm_editor.dump(),
                       "history_exchanges": self.history.value(),
                       "max_tokens": self.max_tokens.value(),
