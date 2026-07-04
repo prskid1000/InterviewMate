@@ -4,11 +4,47 @@ matching cursor feedback)."""
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QRect, Qt
 
 STATE_FILE = Path(__file__).resolve().parent.parent / "overlay_state.json"
+
+# ── screen-capture exclusion (Windows) ───────────────────────────────
+# SetWindowDisplayAffinity keeps the window visible on the physical
+# display but removes it from any capture pipeline — screen recorders,
+# and screen-share in Meet/Zoom/Teams, PrintScreen, Snipping Tool.
+_WDA_NONE = 0x00
+_WDA_MONITOR = 0x01               # capture shows a black box (pre-2004 fallback)
+_WDA_EXCLUDEFROMCAPTURE = 0x11    # capture shows nothing (Windows 10 2004+)
+
+
+def apply_capture_exclusion(widget, enabled: bool = True) -> bool:
+    """Hide/show `widget` from screen capture. Returns True on success.
+
+    No-op (returns False) off Windows. Falls back to WDA_MONITOR on
+    Windows builds older than 10 2004, which renders the window black in
+    captures instead of fully absent."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        hwnd = int(widget.winId())          # forces native handle creation
+        if not hwnd:
+            return False
+        fn = ctypes.windll.user32.SetWindowDisplayAffinity
+        fn.argtypes = [wintypes.HWND, wintypes.DWORD]   # HWND is pointer-sized
+        fn.restype = wintypes.BOOL
+        if not enabled:
+            return bool(fn(hwnd, _WDA_NONE))
+        if fn(hwnd, _WDA_EXCLUDEFROMCAPTURE):
+            return True
+        return bool(fn(hwnd, _WDA_MONITOR))
+    except Exception:
+        return False
 
 
 def load_state() -> dict:

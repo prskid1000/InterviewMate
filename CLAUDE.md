@@ -29,13 +29,13 @@ python -m venv .venv
 | File | Responsibility |
 |------|----------------|
 | `main.py` | Entry point. Starts uvicorn in a thread, builds the Qt app, HUD, settings window, and the global-hotkey listener (`build_hotkeys()` re-registers on rebind). |
-| `server.py` | `Copilot` core + FastAPI. Recording buffers, transcription, prompt assembly (profile + persona + history), the answer stream, and the `/ws` websocket. Emits events to in-process listeners (overlay) and websocket clients. `apply_settings()` hot-reloads config. |
-| `overlay.py` | `Hud` (status glyph + dual live meters, merged into one bar) and `AnswerCard` (continuous-session, all-edge resizable). Subscribes to `Copilot.listeners` via a Qt `Signal`. |
+| `server.py` | `Copilot` core + FastAPI. Multiple **sessions** (tabs) — `transcript`/`exchanges` are properties proxying the active session; `new_/switch_/close_session` post `sessions`/`session_activated` events. Recording buffers, transcription, prompt assembly (profile + per-profile context block + persona + history), the answer stream, optional **auto-silence** VAD in `_on_chunk`, and the `/ws` websocket. `apply_settings()` hot-reloads config. |
+| `overlay.py` | ONE merged, all-edge-resizable window: `Hud` paints the top BAR (status glyph + two vertical-bar equalizer meters) and hosts `SessionTabs` + `AnswerView` (the streamed answer) below it. Capture-hidden + opacity from `overlay.*`; geometry/visibility/collapse persisted. Subscribes to `Copilot.listeners` via a Qt `Signal`. |
 | `settings_ui.py` | Native `SettingsWindow` (sidebar + pages), `ProviderEditor` (the reusable custom-provider list used by both Speech and AI Model), hotkey capture. |
 | `llm.py` | `ProviderChain` — user-defined chat providers. Supports `openai` (OpenAI SDK, streaming) and `anthropic` (Anthropic SDK, `messages.stream`). No hardcoded providers. |
 | `stt.py` | `SttChain` — user-defined STT providers: `openai` (`/audio/transcriptions`), `gemini` (`generateContent` inline audio). Also has legacy `local` (faster-whisper) code, not offered in UI. |
 | `audio.py` | `AudioEngine` — PyAudioWPatch capture. `candidate` = default mic, `interviewer` = default WASAPI loopback. Resamples to 16 kHz mono float32. |
-| `profiles.py` | Loads `profiles/*.md` (YAML frontmatter + body). `{{var}}` templating from `config.yaml` vars + files in `context/`. |
+| `profiles.py` | CRUD for `profiles/*.md` (YAML frontmatter + body): `save_profile`/`delete_profile`. Each profile has its own **context files** in `context/<id>/` (`list_/set_context_files`), injected via `context_block()` and available as `{{title}}` template vars. Loose files at the top of `context/` remain shared vars. |
 | `config.py` | `load_config()` / `save_config()` over `config.yaml`; `CFG` is the shared live dict. |
 | `qt_theme_local.py` | Dark QSS for the settings window. |
 | `uikit.py` | `ResizableMixin` (all-edge frameless resize) + `load_state`/`save_state` (`overlay_state.json`). |

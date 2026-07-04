@@ -9,22 +9,26 @@ reconfigures the live app. Native frame → resizable from every edge/corner.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QPushButton,
-    QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout,
+    QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
+    QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 
+from . import profiles as profiles_mod
 from .config import ROOT, CFG, save_config
 from .qt_theme_local import QSS
-from .uikit import load_state, save_state
+from .uikit import apply_capture_exclusion, load_state, save_state
 
 CONTEXT_DIR = ROOT / "context"
 
-SECTIONS = [("speech", "🎙   Speech-to-text"), ("model", "🧠   AI Model"),
-            ("interview", "💬   Interview"), ("about", "⌨   Hotkeys")]
+SECTIONS = [("speech", "🎙   STT"), ("model", "🧠   AI Model"),
+            ("interview", "💬   Interview"), ("behavior", "🎛   Overlay & Audio"),
+            ("about", "⌨   Hotkeys")]
 
 # Presets only PREFILL a new provider row — they are not a fixed chain.
 # Presets list only FREE-tier providers. Paid ones (OpenAI, Anthropic, …) are
@@ -269,6 +273,96 @@ class ProviderEditor(QWidget):
         return out
 
 
+class ContextFilesEditor(QWidget):
+    """Editable list of titled context files attached to the current profile.
+    Upload any file(s) or paste text; each becomes reference material for that
+    profile's answers (and a {{title}} template var)."""
+
+    def __init__(self):
+        super().__init__()
+        self._files: list[dict] = []      # [{title, content}]
+        v = QVBoxLayout(self); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(9)
+        self._list = QVBoxLayout(); self._list.setSpacing(7)
+        holder = QWidget(); holder.setLayout(self._list)
+        v.addWidget(holder)
+        self._empty = QLabel("No context files for this profile yet.")
+        self._empty.setProperty("class", "row_help")
+        v.addWidget(self._empty)
+        bar = QHBoxLayout()
+        addf = QPushButton("＋  Upload file"); addf.clicked.connect(self._add_file)
+        addt = QPushButton("＋  Add text"); addt.clicked.connect(self._add_text)
+        for b in (addf, addt):
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+        bar.addWidget(addf); bar.addWidget(addt); bar.addStretch(1)
+        v.addLayout(bar)
+        self._relayout()
+
+    def _add_file(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Choose context file(s)", "",
+            "Text & docs (*.txt *.md *.csv *.json *.log *.py);;All files (*.*)")
+        for p in paths:
+            try:
+                content = Path(p).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            self._files.append({"title": Path(p).stem, "content": content})
+        self._relayout()
+
+    def _add_text(self):
+        title, ok = QInputDialog.getText(self, "Add context", "Title:")
+        if not ok or not title.strip():
+            return
+        content, ok = QInputDialog.getMultiLineText(self, "Add context", f"Content for “{title.strip()}”:", "")
+        if not ok:
+            return
+        self._files.append({"title": title.strip(), "content": content})
+        self._relayout()
+
+    def _edit(self, i):
+        f = self._files[i]
+        title, ok = QInputDialog.getText(self, "Edit title", "Title:", text=f["title"])
+        if not ok or not title.strip():
+            return
+        content, ok = QInputDialog.getMultiLineText(self, "Edit content", f"Content for “{title.strip()}”:", f["content"])
+        if not ok:
+            return
+        self._files[i] = {"title": title.strip(), "content": content}
+        self._relayout()
+
+    def _remove(self, i):
+        del self._files[i]
+        self._relayout()
+
+    def _relayout(self):
+        while self._list.count():
+            it = self._list.takeAt(0)
+            w = it.widget()
+            if w:
+                w.deleteLater()
+        for i, f in enumerate(self._files):
+            row = QFrame(); row.setProperty("class", "prow")
+            h = QHBoxLayout(row); h.setContentsMargins(11, 7, 11, 7); h.setSpacing(8)
+            lbl = QLabel(f["title"] or "untitled"); lbl.setStyleSheet("font-weight:600;")
+            meta = QLabel(f"{len(f['content'])} chars"); meta.setProperty("class", "row_help")
+            ed = QPushButton("Edit"); rm = QPushButton("✕")
+            ed.setProperty("class", "iconbtn"); rm.setProperty("class", "iconbtn"); rm.setFixedWidth(26)
+            ed.setCursor(Qt.CursorShape.PointingHandCursor); rm.setCursor(Qt.CursorShape.PointingHandCursor)
+            ed.clicked.connect(lambda _=False, k=i: self._edit(k))
+            rm.clicked.connect(lambda _=False, k=i: self._remove(k))
+            h.addWidget(lbl, 1); h.addWidget(meta); h.addWidget(ed); h.addWidget(rm)
+            self._list.addWidget(row)
+        self._empty.setVisible(not self._files)
+
+    def load(self, files):
+        self._files = [{"title": f.get("title", ""), "content": f.get("content", "")}
+                       for f in (files or [])]
+        self._relayout()
+
+    def dump(self):
+        return [dict(f) for f in self._files if f.get("title", "").strip()]
+
+
 class SettingsWindow(QWidget):
     reconfigured = Signal()
     _hk_captured = Signal(str, str)
@@ -295,18 +389,26 @@ class SettingsWindow(QWidget):
         super().resizeEvent(e)
         save_state(settings_w=self.width(), settings_h=self.height())
 
+    def showEvent(self, e):
+        super().showEvent(e)
+        hidden = bool((CFG.get("overlay", {}) or {}).get("exclude_from_capture", True))
+        apply_capture_exclusion(self, hidden)
+
     # ── build ─────────────────────────────────────────────────────────
 
     def _build(self):
         root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
         body = QWidget(); bl = QHBoxLayout(body); bl.setContentsMargins(0, 0, 0, 0); bl.setSpacing(0)
         self._sidebar = QListWidget(); self._sidebar.setObjectName("sidebar"); self._sidebar.setFixedWidth(184)
+        self._sidebar.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         for sid, label in SECTIONS:
             it = QListWidgetItem(label); it.setData(Qt.ItemDataRole.UserRole, sid)
             self._sidebar.addItem(it)
         self._sidebar.currentRowChanged.connect(lambda i: self._stack.setCurrentIndex(i))
         self._stack = QStackedWidget()
-        for builder in (self._page_speech, self._page_model, self._page_interview, self._page_about):
+        for builder in (self._page_speech, self._page_model, self._page_interview,
+                        self._page_behavior, self._page_about):
             self._stack.addWidget(builder())
         bl.addWidget(self._sidebar); bl.addWidget(self._stack, 1)
         root.addWidget(body, 1)
@@ -327,7 +429,7 @@ class SettingsWindow(QWidget):
 
     def _page_speech(self):
         scroll, lay = _page()
-        lay.addWidget(_title("Speech-to-text",
+        lay.addWidget(_title("STT",
                              "Add any transcription provider — offline Whisper, any OpenAI-compatible "
                              "audio endpoint, or Gemini. Tried top-first; first result wins."))
         card, b = _card("Providers")
@@ -358,39 +460,153 @@ class SettingsWindow(QWidget):
         gen.add(_row("History exchanges", self.history, "Past Q/A kept for follow-ups."))
         self.max_tokens = QSpinBox(); self.max_tokens.setRange(128, 4096); self.max_tokens.setSingleStep(64)
         gen.add(_row("Max answer tokens", self.max_tokens))
-        self.disable_thinking = QCheckBox("Disable Gemini 2.5 thinking (faster answers)")
+        self.disable_thinking = QCheckBox("Disable model thinking (faster answers, any provider)")
         gen.add(self.disable_thinking)
+        self.thinking_tokens = QSpinBox(); self.thinking_tokens.setRange(0, 32768); self.thinking_tokens.setSingleStep(256)
+        self.thinking_tokens.setSpecialValueText("provider default")
+        gen.add(_row("Thinking tokens", self.thinking_tokens,
+                     "Budget when thinking is ON (ignored if disabled above)."))
         c2, b2 = _card("Options"); b2.addWidget(gen)
         lay.addWidget(c2); lay.addStretch(1)
         return scroll
 
     def _page_interview(self):
         scroll, lay = _page()
-        lay.addWidget(_title("Interview", "Your profile and the context the AI answers from."))
-        card, b = _card("Profile & role")
+        lay.addWidget(_title("Interview", "Create as many profiles as you like. Each has its own "
+                                          "prompt and context files."))
+
+        card, b = _card("Profiles")
+        selrow = QWidget(); sh = QHBoxLayout(selrow); sh.setContentsMargins(0, 0, 0, 0); sh.setSpacing(8)
         self.profile = QComboBox()
-        for p in sorted(ROOT.glob("profiles/*.md")):
-            self.profile.addItem(p.stem)
-        b.addWidget(_row("Active profile", self.profile, "Switch anytime, even mid-interview."))
-        self.var_role = QLineEdit(); b.addWidget(_row("Role  ({{role}})", self.var_role))
-        self.var_subject = QLineEdit(); b.addWidget(_row("Subject  ({{subject}})", self.var_subject))
+        newb = QPushButton("＋ New"); delb = QPushButton("Delete")
+        for btn in (newb, delb):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        newb.clicked.connect(self._profile_new)
+        delb.clicked.connect(self._profile_delete)
+        sh.addWidget(self.profile, 1); sh.addWidget(newb); sh.addWidget(delb)
+        b.addWidget(_row("Active profile", selrow, "The selected profile is what the AI answers with."))
+        self.prof_name = QLineEdit(); b.addWidget(_row("Display name", self.prof_name))
+        hint = QLabel("The full system prompt for this profile — include the role, the tone/format "
+                      "you want, length, and language all here. Reference any context-file title as {{title}}.")
+        hint.setProperty("class", "row_help"); hint.setWordWrap(True)
+        b.addWidget(hint)
+        self.prof_body = QPlainTextEdit(); self.prof_body.setMinimumHeight(200)
+        self.prof_body.setPlaceholderText("e.g. You are helping me in a live interview for a backend role.\n"
+                                          "Answer in short, confident, speakable bullet points…")
+        b.addWidget(self.prof_body)
         lay.addWidget(card)
 
-        pcard, pb = _card("Persona", "how the AI responds to every question")
-        hint = QLabel("Tone, format, length and language of the suggested answers. "
-                      "Applied on top of the selected profile.")
-        hint.setProperty("class", "row_help"); hint.setWordWrap(True)
-        pb.addWidget(hint)
-        self.persona = QPlainTextEdit(); self.persona.setMinimumHeight(130)
-        pb.addWidget(self.persona)
-        lay.addWidget(pcard)
-
-        rc = Collapsible("Resume  ({{resume}})")
-        self.resume = QPlainTextEdit(); self.resume.setMinimumHeight(120); rc.add(self.resume)
-        jc = Collapsible("Job description  ({{job_description}})")
-        self.jd = QPlainTextEdit(); self.jd.setMinimumHeight(100); jc.add(self.jd)
-        cc, cb = _card("Context files"); cb.addWidget(rc); cb.addWidget(jc)
+        cc, cb = _card("Context files", "attached to this profile — uploaded or pasted")
+        self.ctx_editor = ContextFilesEditor()
+        cb.addWidget(self.ctx_editor)
         lay.addWidget(cc); lay.addStretch(1)
+
+        self.profile.currentIndexChanged.connect(self._on_profile_switch)
+        return scroll
+
+    # ── profile management ─────────────────────────────────────────────
+
+    def _sync_current_profile(self):
+        """Persist the visible widgets back into the in-memory model."""
+        if not getattr(self, "_cur_pid", None):
+            return
+        m = self._prof_model.get(self._cur_pid)
+        if m is None:
+            return
+        m["name"] = self.prof_name.text().strip() or self._cur_pid
+        m["body"] = self.prof_body.toPlainText()
+        m["files"] = self.ctx_editor.dump()
+
+    def _load_profile_into_widgets(self, pid):
+        m = self._prof_model.get(pid)
+        self._cur_pid = pid
+        if m is None:
+            return
+        self.prof_name.setText(m.get("name") or pid)
+        self.prof_body.setPlainText(m.get("body") or "")
+        self.ctx_editor.load(m.get("files") or [])
+
+    def _on_profile_switch(self, _idx):
+        pid = self.profile.currentData()
+        if not pid or pid == getattr(self, "_cur_pid", None):
+            return
+        self._sync_current_profile()
+        self._load_profile_into_widgets(pid)
+
+    def _refill_profile_combo(self, select_pid):
+        self.profile.blockSignals(True)
+        self.profile.clear()
+        for pid, m in self._prof_model.items():
+            self.profile.addItem(m.get("name") or pid, pid)
+        idx = max(0, self.profile.findData(select_pid))
+        self.profile.setCurrentIndex(idx)
+        self.profile.blockSignals(False)
+
+    def _profile_new(self):
+        name, ok = QInputDialog.getText(self, "New profile", "Profile name:")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        pid = profiles_mod._slug(name)
+        if pid in self._prof_model:
+            QMessageBox.information(self, "Exists", "A profile with that name already exists.")
+            return
+        self._sync_current_profile()
+        self._prof_model[pid] = {
+            "name": name, "temp": None, "files": [],
+            "body": "You are helping me in a live interview.\n"
+                    "Give concise, confident, speakable answers.",
+        }
+        self._deleted_profiles.discard(pid)
+        self._refill_profile_combo(pid)
+        self._load_profile_into_widgets(pid)
+
+    def _profile_delete(self):
+        pid = self.profile.currentData()
+        if not pid:
+            return
+        if len(self._prof_model) <= 1:
+            QMessageBox.information(self, "Keep one", "At least one profile is required.")
+            return
+        if QMessageBox.question(self, "Delete profile", f"Delete profile “{pid}” and its context files?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self._prof_model.pop(pid, None)
+        self._deleted_profiles.add(pid)
+        self._cur_pid = None
+        nxt = next(iter(self._prof_model))
+        self._refill_profile_combo(nxt)
+        self._load_profile_into_widgets(nxt)
+
+    def _page_behavior(self):
+        scroll, lay = _page()
+        lay.addWidget(_title("Overlay & Audio",
+                             "How the HUD looks and how recording is triggered."))
+
+        oc, ob = _card("Overlay", "appearance & privacy of the HUD window")
+        self.opacity = QDoubleSpinBox()
+        self.opacity.setRange(0.30, 1.00); self.opacity.setSingleStep(0.05); self.opacity.setDecimals(2)
+        ob.addWidget(_row("HUD opacity", self.opacity,
+                          "1.00 = solid, lower = more see-through."))
+        self.hide_capture = QCheckBox("Hide HUD from screen recording & screen-share")
+        ob.addWidget(self.hide_capture)
+        hint = QLabel("Stays visible on your screen but is invisible to OBS, Google "
+                      "Meet / Zoom / Teams share, and screenshots (Windows).")
+        hint.setProperty("class", "row_help"); hint.setWordWrap(True); ob.addWidget(hint)
+        lay.addWidget(oc)
+
+        ac, ab = _card("Auto-record", "detect speech and record hands-free")
+        self.auto_silence = QCheckBox("Auto start/stop recording on silence detection")
+        ab.addWidget(self.auto_silence)
+        self.silence_secs = QDoubleSpinBox()
+        self.silence_secs.setRange(0.4, 5.0); self.silence_secs.setSingleStep(0.1); self.silence_secs.setDecimals(1)
+        ab.addWidget(_row("Silence gap (s)", self.silence_secs,
+                          "How long a pause ends a turn and triggers transcription."))
+        self.silence_sens = QDoubleSpinBox()
+        self.silence_sens.setRange(0.005, 0.20); self.silence_sens.setSingleStep(0.005); self.silence_sens.setDecimals(3)
+        ab.addWidget(_row("Speech threshold", self.silence_sens,
+                          "Level above which audio counts as speech. Lower = more sensitive."))
+        lay.addWidget(ac); lay.addStretch(1)
         return scroll
 
     def _page_about(self):
@@ -463,15 +679,44 @@ class SettingsWindow(QWidget):
         self.history.setValue(int(llm.get("history_exchanges", 12)))
         self.max_tokens.setValue(int(llm.get("max_tokens", 900)))
         self.disable_thinking.setChecked(bool(llm.get("disable_thinking", True)))
+        self.thinking_tokens.setValue(int(llm.get("thinking_tokens", 0)))
 
-        self.profile.setCurrentText(CFG.get("profile", "technical"))
-        self.persona.setPlainText(CFG.get("persona", "") or "")
-        v = CFG.get("vars", {}) or {}
-        self.var_role.setText(v.get("role", ""))
-        self.var_subject.setText(v.get("subject", ""))
-        for widget, fname in ((self.resume, "resume.md"), (self.jd, "job_description.md")):
-            fp = CONTEXT_DIR / fname
-            widget.setPlainText(fp.read_text(encoding="utf-8") if fp.exists() else "")
+        ov = CFG.get("overlay", {}) or {}
+        self.opacity.setValue(float(ov.get("opacity", 1.0)))
+        self.hide_capture.setChecked(bool(ov.get("exclude_from_capture", True)))
+        au = CFG.get("audio", {}) or {}
+        self.auto_silence.setChecked(bool(au.get("auto_silence", False)))
+        self.silence_secs.setValue(float(au.get("silence_seconds", 1.2)))
+        self.silence_sens.setValue(float(au.get("speech_threshold", 0.02)))
+
+        # profiles → in-memory model {id: {name, body, temp, files}}
+        self._prof_model = {}
+        self._deleted_profiles = set()
+        self._cur_pid = None
+        for pid, p in profiles_mod.list_profiles().items():
+            self._prof_model[pid] = {
+                "name": p.get("name") or pid,
+                "body": p.get("body") or "",
+                "temp": (p.get("meta") or {}).get("temperature"),
+                "files": profiles_mod.list_context_files(pid),
+            }
+        if not self._prof_model:      # ensure at least one profile exists
+            self._prof_model["default"] = {"name": "default", "body":
+                "You are helping me in a live interview. Give concise, speakable answers.",
+                "temp": None, "files": []}
+        # legacy global persona folds into each profile's prompt (one-time),
+        # then it's cleared on save — prompt + persona are one field now.
+        persona = (CFG.get("persona") or "").strip()
+        if persona:
+            for m in self._prof_model.values():
+                body = (m.get("body") or "").rstrip()
+                m["body"] = f"{body}\n\n{persona}".strip() if body else persona
+
+        want = CFG.get("profile", "")
+        if want not in self._prof_model:
+            want = next(iter(self._prof_model))
+        self._refill_profile_combo(want)
+        self._load_profile_into_widgets(want)
 
         self._hotkey_edits = dict(CFG.get("hotkeys", {}) or {})
         for action, btn in self._hk_buttons.items():
@@ -485,15 +730,30 @@ class SettingsWindow(QWidget):
                       "history_exchanges": self.history.value(),
                       "max_tokens": self.max_tokens.value(),
                       "temperature": round(self.temperature.value(), 2),
-                      "disable_thinking": self.disable_thinking.isChecked()}
-        cfg["profile"] = self.profile.currentText()
-        cfg["persona"] = self.persona.toPlainText().strip()
-        cfg["vars"] = {"role": self.var_role.text().strip(), "subject": self.var_subject.text().strip()}
+                      "disable_thinking": self.disable_thinking.isChecked(),
+                      "thinking_tokens": self.thinking_tokens.value()}
+        # persist all profiles + their context files
+        self._sync_current_profile()
+        for pid in self._deleted_profiles:
+            profiles_mod.delete_profile(pid)
+        self._deleted_profiles.clear()
+        for pid, m in self._prof_model.items():
+            meta = {}
+            if m.get("temp"):
+                meta["temperature"] = m["temp"]
+            profiles_mod.save_profile(pid, m.get("name") or pid, m.get("body") or "", meta)
+            profiles_mod.set_context_files(pid, m.get("files") or [])
+        cfg["profile"] = self.profile.currentData() or self._cur_pid
+        cfg["persona"] = ""          # merged into each profile's prompt
+        cfg.pop("vars", None)
         cfg["hotkeys"] = dict(self._hotkey_edits)
-
-        CONTEXT_DIR.mkdir(exist_ok=True)
-        (CONTEXT_DIR / "resume.md").write_text(self.resume.toPlainText(), encoding="utf-8")
-        (CONTEXT_DIR / "job_description.md").write_text(self.jd.toPlainText(), encoding="utf-8")
+        cfg["overlay"] = {**(CFG.get("overlay", {}) or {}),
+                          "opacity": round(self.opacity.value(), 2),
+                          "exclude_from_capture": self.hide_capture.isChecked()}
+        cfg["audio"] = {**(CFG.get("audio", {}) or {}),
+                        "auto_silence": self.auto_silence.isChecked(),
+                        "silence_seconds": round(self.silence_secs.value(), 1),
+                        "speech_threshold": round(self.silence_sens.value(), 3)}
 
         save_config(cfg)
         self.co.apply_settings()

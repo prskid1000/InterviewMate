@@ -1,79 +1,56 @@
-# ---- Speech to text — add any number of custom providers (Settings → Speech) ----
-# api_type: local (offline whisper) | openai (any /audio/transcriptions endpoint) | gemini
 stt:
   language: en
   providers:
-    - name: Gemini
-      api_type: gemini
-      api_key_env: GEMINI_API_KEY
-      model: gemini-2.5-flash-lite
-      enabled: true
-    - name: Groq Whisper
-      api_type: openai
-      base_url: https://api.groq.com/openai/v1
-      api_key_env: GROQ_API_KEY
-      model: whisper-large-v3-turbo
-      enabled: false
-
-# ---- Overlay (voxtype-style pill, NO system tray icon) ----
+  - name: Gemini
+    api_type: gemini
+    model: gemini-2.5-flash-lite
+    enabled: true
+    base_url: ''
+    api_key_env: GEMINI_API_KEY
+  - name: Groq Whisper
+    api_type: openai
+    model: whisper-large-v3-turbo
+    enabled: false
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
 overlay:
-  enabled: true            # false = browser UI only
-
-# ---- Global hotkeys (work everywhere, even while in the meeting window) ----
+  enabled: true
+  exclude_from_capture: false
+  opacity: 0.9
 hotkeys:
-  record_toggle: ctrl+space      # start / stop recording
-  open_config: ctrl+alt+c        # toggle the settings window
-  toggle_answer: ctrl+alt+h      # show / hide the answer card
-  toggle_hud: ctrl+alt+b         # show / hide the main HUD palette
-  quit: ctrl+alt+q               # quit the app
-
-# ---- Audio capture (recording is MANUAL: start/stop button in the UI) ----
+  record_toggle: ctrl+space
+  open_config: ctrl+alt+c
+  toggle_answer: ctrl+alt+h
+  toggle_hud: ctrl+alt+b
+  quit: ctrl+alt+q
 audio:
-  capture_mic: true            # your voice  -> "me"
-  capture_system_audio: true   # meeting audio (WASAPI loopback) -> "interviewer"
-  max_record_seconds: 180      # safety auto-stop for a single recording
-
-# ---- AI models — add any number of custom providers (Settings → AI Model) ----
-# api_type: openai (any OpenAI-compatible endpoint) | anthropic. Tried top-first.
-# api_key can be inline, or api_key_env to read from .env.
+  capture_mic: true
+  capture_system_audio: true
+  max_record_seconds: 180
+  auto_silence: false
+  silence_seconds: 1.2
+  speech_threshold: 0.02
 llm:
   providers:
-    - name: Gemini
-      api_type: openai
-      base_url: https://generativelanguage.googleapis.com/v1beta/openai/
-      api_key_env: GEMINI_API_KEY
-      model: gemini-2.5-flash-lite   # flash-lite has its own free daily quota
-      enabled: true
-    - name: Groq
-      api_type: openai
-      base_url: https://api.groq.com/openai/v1
-      api_key_env: GROQ_API_KEY
-      model: llama-3.3-70b-versatile
-      enabled: false
-  history_exchanges: 12    # how many past Q/A exchanges to keep in context (deep follow-ups)
+  - name: Gemini
+    api_type: openai
+    model: gemini-2.5-flash-lite
+    enabled: true
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
+  - name: Groq
+    api_type: openai
+    model: llama-3.3-70b-versatile
+    enabled: false
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+  history_exchanges: 12
   max_tokens: 900
   temperature: 0.4
-  disable_thinking: true   # turn off Gemini 2.5 "thinking" for faster answers
-
-# ---- Prompt profile used at startup (files in profiles/) ----
-profile: technical
-
-# ---- Persona: how the AI should respond (appended to every answer prompt) ----
-persona: |
-  Answer in natural desi (Indian English) conversational style — simple everyday
-  words, short speakable sentences, confident but humble, like explaining to a
-  colleague over chai. Give 3-6 crisp bullet points I can say out loud, with the
-  direct answer first, then a quick reason or trade-off. Keep it under 90 words
-  unless it's a coding or system-design question. If I already attempted an
-  answer, improve and complete it instead of repeating it, and always stay
-  consistent with what I said earlier in this session.
-
-# ---- Template variables available in profiles as {{name}} ----
-# (files in context/ are also exposed: context/resume.md -> {{resume}})
-vars:
-  role: Senior Java Backend Developer
-  subject: Java, Spring Boot, microservices, SQL, system design
-
+  disable_thinking: true
+  thinking_tokens: 0
+profile: Interview
+persona: ''
 server:
   host: 127.0.0.1
   port: 8765

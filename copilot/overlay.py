@@ -1,11 +1,13 @@
-"""Frameless always-on-top overlay.
+"""Frameless always-on-top overlay — ONE unified HUD window.
 
-Two pieces:
-  Hud        — ONE compact bar merging the status indicator and both live
-               level meters (INTERVIEWER + YOU). Click the status dot to
-               record; drag the bar to move; right-click for the menu.
-  AnswerCard — separate panel that streams ONLY the AI answer. Resizable
-               from every edge and corner; size + position persisted.
+A single frameless, capture-hidden window that stacks:
+  • the top BAR — status glyph + both live level meters (INTERVIEWER / YOU)
+  • the answer area — streams the AI answer as one continuous session
+
+Drag the bar to move; click the left status zone to record; right-click for
+the menu; resize from any edge/corner. The answer area can be collapsed
+(toggle_answer hotkey). Position, size, visibility and collapsed state all
+persist across restarts.
 """
 from __future__ import annotations
 
@@ -19,10 +21,17 @@ from PySide6.QtGui import (
     QBrush, QColor, QLinearGradient, QMouseEvent, QPainter, QPainterPath, QPen,
 )
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QMenu, QScrollArea, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
-from .uikit import ResizableMixin, load_state, save_state
+from .config import CFG
+from .uikit import ResizableMixin, apply_capture_exclusion, load_state, save_state
+
+
+def _capture_hidden() -> bool:
+    """config overlay.exclude_from_capture (default on)."""
+    return bool((CFG.get("overlay", {}) or {}).get("exclude_from_capture", True))
+
 
 _OVERLAY_FLAGS = (
     Qt.WindowType.FramelessWindowHint
@@ -31,8 +40,8 @@ _OVERLAY_FLAGS = (
     | Qt.WindowType.WindowDoesNotAcceptFocus
 )
 
-INT_COLOR = QColor(242, 184, 75)     # interviewer — amber
-ME_COLOR = QColor(52, 201, 142)      # you — green
+INT_COLOR = QColor(255, 186, 48)     # interviewer — vivid amber
+ME_COLOR = QColor(38, 224, 150)      # you — vivid green
 
 _ACCENT = {
     "idle":       QColor(255, 255, 255, 22),
@@ -69,26 +78,30 @@ def _md_html(s: str) -> str:
     return "".join(out)
 
 
-class AnswerCard(ResizableMixin, QWidget):
-    """Streams the AI answer. Resizable from all edges/corners."""
+class AnswerView(QWidget):
+    """Embedded answer stream (no window chrome — it lives inside the Hud).
+
+    Same continuous-session rendering as before, minus the frame/drag/resize:
+    the Hud owns the window, this just paints the streamed answer."""
 
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(_OVERLAY_FLAGS)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        self.init_resize(min_w=260, min_h=140)
-        st = load_state()
-        self.resize(int(st.get("answer_w", 480)), int(st.get("answer_h", 300)))
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 13, 16, 12)
+        lay.setContentsMargins(16, 8, 16, 12)
         lay.setSpacing(7)
 
-        self._hdr = QLabel("AI answers · one continuous session")
+        self._hdr = QLabel("AI answers")
         self._hdr.setStyleSheet(
             "color:#5b6a86; font:600 10px 'Segoe UI'; letter-spacing:0.06em; background:transparent;")
         lay.addWidget(self._hdr)
+
+        # status / backend-error line (shown above the answer body)
+        self._status = QLabel()
+        self._status.setWordWrap(True)
+        self._status.setVisible(False)
+        lay.addWidget(self._status)
 
         self._body = QLabel()
         self._body.setWordWrap(True)
@@ -116,12 +129,23 @@ class AnswerCard(ResizableMixin, QWidget):
         self._cur_q = ""
         self._raw = ""
         self._dirty = False
-        self._drag: QPoint | None = None
         self._render = QTimer(self)
         self._render.setInterval(120)
         self._render.timeout.connect(self._flush)
 
     # streaming (Qt thread) --------------------------------------------
+
+    def set_status(self, text: str, error: bool = False):
+        """Show a transient backend/status line (e.g. 'Transcribing…' or a
+        clear backend error). Empty text hides it."""
+        if not text:
+            self._status.setVisible(False)
+            return
+        color = "#f87171" if error else "#8a96aa"
+        self._status.setStyleSheet(
+            f"color:{color}; font:{'600 ' if error else ''}11px 'Segoe UI'; background:transparent;")
+        self._status.setText(text)
+        self._status.setVisible(True)
 
     def reset(self):
         """New session — wipe the accumulated conversation."""
@@ -130,15 +154,15 @@ class AnswerCard(ResizableMixin, QWidget):
         self._raw = ""
         self._body.setText("")
         self._foot.setText("")
+        self.set_status("")
 
     def begin(self, question: str):
         self._commit()                 # fold the previous answer into history
         self._cur_q = question
         self._raw = ""
+        self.set_status("")            # clear any stale status once an answer starts
         self._render.start()
         self._render_now(thinking=True)
-        self.show()
-        self.raise_()
 
     def add(self, delta: str, provider: str | None):
         self._raw += delta
@@ -153,6 +177,20 @@ class AnswerCard(ResizableMixin, QWidget):
 
     def error(self, text: str):
         self._raw += f"\n**Error:** {text}"
+        self._render_now()
+
+    def load_exchanges(self, exchanges):
+        """Rebuild the whole panel from a session's stored Q/A history (used
+        when switching tabs)."""
+        self._render.stop()
+        self._cur_q = ""
+        self._raw = ""
+        self.set_status("")
+        html_parts = []
+        for ex in exchanges or []:
+            html_parts.append(self._block(ex.get("qd", ""), ex.get("a", "")))
+            html_parts.append("<div style='border-top:1px solid #232c3a;margin:11px 0;'></div>")
+        self._committed = "".join(html_parts)
         self._render_now()
 
     def _commit(self):
@@ -182,58 +220,62 @@ class AnswerCard(ResizableMixin, QWidget):
         sb = self._scroll.verticalScrollBar()
         sb.setValue(sb.maximum())
 
-    # chrome ------------------------------------------------------------
 
-    def paintEvent(self, _e):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setBrush(QBrush(QColor(13, 17, 23, 246)))
-        p.setPen(QPen(QColor(42, 51, 66), 1.0))
-        p.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), 13, 13)
-        p.end()
+class SessionTabs(QWidget):
+    """Row of session tabs (+ a new-tab button). The active tab's context is
+    what the AI answers from; switching swaps the shown conversation."""
 
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        save_state(answer_w=self.width(), answer_h=self.height())
+    _TAB = ("QPushButton{{background:{bg};color:{fg};border:1px solid {bd};"
+            "border-radius:7px;padding:3px 10px;font:600 11px 'Segoe UI';}}"
+            "QPushButton:hover{{border:1px solid #6ba4ff;}}")
 
-    def place_near(self, hud: QWidget):
-        g = hud.frameGeometry()
-        screen = hud.screen()
-        if screen is None:
-            return
-        sg = screen.availableGeometry()
-        x = min(max(sg.x() + 8, g.center().x() - self.width() // 2),
-                sg.x() + sg.width() - self.width() - 8)
-        y = g.top() - self.height() - 10
-        if y < sg.y() + 8:
-            y = g.bottom() + 10
-        self.move(x, y)
+    def __init__(self, on_switch, on_new, on_close):
+        super().__init__()
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._on_switch, self._on_new, self._on_close = on_switch, on_new, on_close
+        self._lay = QHBoxLayout(self)
+        self._lay.setContentsMargins(12, 6, 12, 2)
+        self._lay.setSpacing(5)
 
-    def mousePressEvent(self, e: QMouseEvent):
-        if self.rz_press(e):
-            return
-        if e.button() == Qt.MouseButton.LeftButton:
-            self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
-
-    def mouseMoveEvent(self, e: QMouseEvent):
-        if self.rz_move(e):
-            return
-        if self._drag is not None and e.buttons() & Qt.MouseButton.LeftButton:
-            self.move(e.globalPosition().toPoint() - self._drag)
-
-    def mouseReleaseEvent(self, _e):
-        self.rz_release()
-        self._drag = None
+    def render(self, sessions, active):
+        while self._lay.count():
+            it = self._lay.takeAt(0)
+            w = it.widget()
+            if w:
+                w.deleteLater()
+        closable = len(sessions) > 1
+        for i, s in enumerate(sessions):
+            tab = QPushButton(s.get("title", f"Session {i+1}"))
+            tab.setCursor(Qt.CursorShape.PointingHandCursor)
+            on = (i == active)
+            tab.setStyleSheet(self._TAB.format(
+                bg="#1b2740" if on else "rgba(255,255,255,0.04)",
+                fg="#dce6f7" if on else "#8a96aa",
+                bd="#3a568c" if on else "#232c3a"))
+            tab.clicked.connect(lambda _=False, k=i: self._on_switch(k))
+            if closable:
+                tab.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                tab.customContextMenuRequested.connect(lambda _p, k=i: self._on_close(k))
+            self._lay.addWidget(tab)
+        plus = QPushButton("＋")
+        plus.setCursor(Qt.CursorShape.PointingHandCursor)
+        plus.setToolTip("New session")
+        plus.setStyleSheet(self._TAB.format(bg="rgba(255,255,255,0.04)", fg="#8a96aa", bd="#232c3a"))
+        plus.clicked.connect(lambda: self._on_new())
+        self._lay.addWidget(plus)
+        self._lay.addStretch(1)
 
 
 class Hud(ResizableMixin, QWidget):
-    """Single bar: status glyph on the left + both live meters. Merged from
-    the old separate pill and meter widgets."""
+    """The single overlay window: status glyph + dual meters in a top BAR,
+    with the streaming answer area stacked beneath it."""
 
     event_sig = Signal(dict)
     ui_sig = Signal(str)
 
-    MIN_W, MIN_H = 250, 58
+    MIN_W = 280
+    BAR_H = 58                 # height of the status/meter strip at the top
+    DEFAULT_H = 320            # expanded height when no state is saved
 
     def __init__(self, co, config_url: str):
         super().__init__()
@@ -243,19 +285,32 @@ class Hud(ResizableMixin, QWidget):
         self.setWindowFlags(_OVERLAY_FLAGS)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        self.init_resize(min_w=self.MIN_W, min_h=self.MIN_H)
+        self.init_resize(min_w=self.MIN_W, min_h=self.BAR_H)
 
         st = load_state()
-        self.resize(int(st.get("hud_w", 330)), int(st.get("hud_h", self.MIN_H)))
-
         self._state = "idle"
         self._phase = 0
         self._drag: QPoint | None = None
         self._moved = False
         self._int_disp = 0.0
         self._me_disp = 0.0
+        self._answer_expanded = bool(st.get("answer_expanded", True))
 
-        self.card = AnswerCard()
+        # tabs + answer area live below the bar; the layout reserves the strip
+        self.tabs = SessionTabs(self._switch_session, self._new_session, self._close_session)
+        self.answer = AnswerView()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(1, self.BAR_H, 1, 1)
+        lay.setSpacing(0)
+        lay.addWidget(self.tabs)
+        lay.addWidget(self.answer)
+        self.tabs.setVisible(self._answer_expanded)
+        self.answer.setVisible(self._answer_expanded)
+        self.tabs.render(co.sessions_meta(), co.active)
+
+        w = int(st.get("hud_w", 360))
+        h = int(st.get("hud_h", self.DEFAULT_H)) if self._answer_expanded else self.BAR_H
+        self.resize(w, h)
 
         self.event_sig.connect(self._on_event)
         self.ui_sig.connect(self._on_ui)
@@ -267,7 +322,16 @@ class Hud(ResizableMixin, QWidget):
         self._tick.start()
 
         self._place()
-        self.show()
+        self._apply_overlay_cfg()
+        if bool(st.get("hud_visible", True)):
+            self.show()
+
+    def _apply_overlay_cfg(self):
+        """Opacity + capture-exclusion from config (called at start and after
+        Settings → Save)."""
+        ov = CFG.get("overlay", {}) or {}
+        self.setWindowOpacity(max(0.2, min(1.0, float(ov.get("opacity", 1.0)))))
+        apply_capture_exclusion(self, _capture_hidden())
 
     # events ------------------------------------------------------------
 
@@ -278,28 +342,35 @@ class Hud(ResizableMixin, QWidget):
     def _on_event(self, m: dict):
         t = m.get("type")
         if t == "recording":
-            # keep the previous answer visible while recording the next question
             self._set("recording" if m.get("on") else "processing")
         elif t == "answer_start":
             self._set("answering")
-            was_visible = self.card.isVisible()
-            self.card.begin(m.get("question", ""))
-            if not was_visible:
-                self.card.place_near(self)
+            self._set_answer_expanded(True)        # an answer forces the panel open
+            self.answer.begin(m.get("question", ""))
         elif t == "cleared":
-            self.card.reset()
+            self.answer.reset()
         elif t == "answer_delta":
-            self.card.add(m.get("text", ""), m.get("provider"))
+            self.answer.add(m.get("text", ""), m.get("provider"))
         elif t == "answer_done":
-            self.card.finish()
+            self.answer.finish()
             self._set("idle")
         elif t == "answer_error":
-            self.card.error(m.get("text", ""))
+            self.answer.error(m.get("text", ""))
             self._flash_error()
         elif t == "pipeline_idle":
             self._set("idle")
-        elif t == "status" and m.get("level") == "error":
-            self._flash_error()
+        elif t == "sessions":
+            self.tabs.render(m.get("list", []), m.get("active", 0))
+        elif t == "session_activated":
+            self.answer.load_exchanges(m.get("exchanges", []))
+        elif t == "settings_applied":
+            self._apply_overlay_cfg()
+        elif t == "status":
+            is_err = m.get("level") == "error"
+            self.answer.set_status(m.get("text", ""), error=is_err)
+            if is_err:
+                self._set_answer_expanded(True)   # make the error visible
+                self._flash_error()
 
     def _flash_error(self):
         self._set("error")
@@ -307,7 +378,7 @@ class Hud(ResizableMixin, QWidget):
 
     def _on_ui(self, cmd: str):
         if cmd == "toggle_answer":
-            self._toggle_card()
+            self._toggle_answer()
         elif cmd == "toggle_hud":
             self._toggle_hud()
         elif cmd == "toggle_settings" and self.settings is not None:
@@ -318,9 +389,12 @@ class Hud(ResizableMixin, QWidget):
     def _toggle_hud(self):
         if self.isVisible():
             self.hide()
+            save_state(hud_visible=False)
         else:
             self.show()
             self.raise_()
+            apply_capture_exclusion(self, _capture_hidden())
+            save_state(hud_visible=True)
 
     def toggle_answer_threadsafe(self):
         self.ui_sig.emit("toggle_answer")
@@ -334,7 +408,38 @@ class Hud(ResizableMixin, QWidget):
     def toggle_record_threadsafe(self):
         self.ui_sig.emit("toggle_record")
 
-    # placement ---------------------------------------------------------
+    # answer collapse/expand -------------------------------------------
+
+    def _set_answer_expanded(self, on: bool):
+        if on == self._answer_expanded and self.answer.isVisible() == on:
+            return
+        self._answer_expanded = on
+        self.tabs.setVisible(on)
+        self.answer.setVisible(on)
+        if on:
+            h = int(load_state().get("hud_h", self.DEFAULT_H))
+            self.resize(self.width(), max(h, self.BAR_H + 60))
+        else:
+            self.resize(self.width(), self.BAR_H)
+        save_state(answer_expanded=on)
+
+    def _toggle_answer(self):
+        self._set_answer_expanded(not self._answer_expanded)
+
+    # sessions / tabs ---------------------------------------------------
+
+    def _new_session(self):
+        self._set_answer_expanded(True)
+        self.co.new_session()
+
+    def _switch_session(self, idx: int):
+        self._set_answer_expanded(True)
+        self.co.switch_session(idx)
+
+    def _close_session(self, idx: int):
+        self.co.close_session(idx)
+
+    # placement / geometry ---------------------------------------------
 
     def _place(self):
         s = load_state()
@@ -354,7 +459,15 @@ class Hud(ResizableMixin, QWidget):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        save_state(hud_w=self.width(), hud_h=self.height())
+        # only remember height while expanded, so collapsing doesn't clobber it
+        if self._answer_expanded:
+            save_state(hud_w=self.width(), hud_h=self.height())
+        else:
+            save_state(hud_w=self.width())
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        apply_capture_exclusion(self, _capture_hidden())
 
     # mouse -------------------------------------------------------------
 
@@ -365,6 +478,7 @@ class Hud(ResizableMixin, QWidget):
             self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
             self._moved = False
             self._press_x = e.position().x()
+            self._press_y = e.position().y()
 
     def mouseMoveEvent(self, e: QMouseEvent):
         if self.rz_move(e):
@@ -380,9 +494,11 @@ class Hud(ResizableMixin, QWidget):
             return
         if self._drag is not None:
             save_state(hud_x=self.x(), hud_y=self.y())
+            # click (no drag) on the left status zone of the BAR = record toggle
             if not self._moved and e.button() == Qt.MouseButton.LeftButton \
-                    and getattr(self, "_press_x", 99) < 52:
-                self._toggle_recording()   # click the status zone to record
+                    and getattr(self, "_press_x", 99) < 52 \
+                    and getattr(self, "_press_y", 99) < self.BAR_H:
+                self._toggle_recording()
         self._drag = None
 
     def contextMenuEvent(self, e):
@@ -395,8 +511,8 @@ class Hud(ResizableMixin, QWidget):
             "QMenu::separator{height:1px;background:#1e2636;margin:4px 6px;}")
         rec = menu.addAction("Stop recording" if self.co.recording else "Start recording")
         rec.triggered.connect(self._toggle_recording)
-        ans = menu.addAction("Hide answer" if self.card.isVisible() else "Show last answer")
-        ans.triggered.connect(self._toggle_card)
+        ans = menu.addAction("Collapse answer" if self._answer_expanded else "Expand answer")
+        ans.triggered.connect(self._toggle_answer)
         menu.addSeparator()
         cfg = menu.addAction("Settings…")
         cfg.triggered.connect(lambda: self.settings.toggle() if self.settings else webbrowser.open(self.config_url))
@@ -412,61 +528,70 @@ class Hud(ResizableMixin, QWidget):
     def _toggle_recording(self):
         self.co.record_stop() if self.co.recording else self.co.record_start()
 
-    def _toggle_card(self):
-        if self.card.isVisible():
-            self.card.hide()
-        else:
-            self.card.place_near(self)
-            self.card.show()
-
     # painting ----------------------------------------------------------
 
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         W, H = self.width(), self.height()
+        B = self.BAR_H
 
-        # shell — subtle state-tinted border
+        # window shell — subtle state-tinted border over the whole window
         p.setBrush(QBrush(QColor(13, 17, 23, 247)))
         p.setPen(QPen(_ACCENT.get(self._state, _ACCENT["idle"]), 1.4))
         p.drawRoundedRect(QRectF(0.7, 0.7, W - 1.4, H - 1.4), 14, 14)
 
-        # left status zone
-        self._draw_status(p, 27, H / 2)
-        # divider
+        # ── top BAR (fixed strip) ──
+        self._draw_status(p, 27, B / 2)
         p.setPen(QPen(QColor(255, 255, 255, 20), 1.0))
-        p.drawLine(51, 14, 51, H - 14)
+        p.drawLine(51, 14, 51, B - 14)
 
-        # meters
         lx = 62
         bx = lx + 78
         bw = W - bx - 14
-        self._meter(p, lx, bx, bw, H * 0.32, "INTERVIEWER", self._int_disp, INT_COLOR)
-        self._meter(p, lx, bx, bw, H * 0.68, "YOU", self._me_disp, ME_COLOR)
+        self._meter(p, lx, bx, bw, B * 0.32, "INTERVIEWER", self._int_disp, INT_COLOR)
+        self._meter(p, lx, bx, bw, B * 0.68, "YOU", self._me_disp, ME_COLOR)
+
+        # divider between the bar and the answer area (only when expanded)
+        if self._answer_expanded and H > B + 2:
+            p.setPen(QPen(QColor(255, 255, 255, 16), 1.0))
+            p.drawLine(12, B, W - 12, B)
         p.end()
 
     def _meter(self, p, lx, bx, bw, cy, label, lvl, color):
-        p.setPen(QPen(QColor(150, 162, 180)))
+        # channel label
+        p.setPen(QPen(QColor(176, 188, 206)))
         f = p.font(); f.setPointSizeF(7.0); f.setBold(True); p.setFont(f)
         p.drawText(QRectF(lx, cy - 8, 74, 16), Qt.AlignmentFlag.AlignVCenter, label)
-        bh = 7.0
-        # track
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(QColor(255, 255, 255, 16)))
-        p.drawRoundedRect(QRectF(bx, cy - bh / 2, bw, bh), bh / 2, bh / 2)
-        # fill w/ gradient + soft glow
-        w = max(0.0, bw * min(1.0, lvl))
-        if w > 1:
-            glow = QColor(color); glow.setAlpha(70)
-            p.setBrush(QBrush(glow))
-            p.drawRoundedRect(QRectF(bx, cy - bh / 2 - 1.2, w, bh + 2.4), (bh + 2.4) / 2, (bh + 2.4) / 2)
-            grad = QLinearGradient(bx, 0, bx + bw, 0)
-            c0 = QColor(color); c0.setAlpha(210)
-            grad.setColorAt(0.0, c0); grad.setColorAt(1.0, color)
-            p.setBrush(QBrush(grad))
-            p.drawRoundedRect(QRectF(bx, cy - bh / 2, w, bh), bh / 2, bh / 2)
 
-    # ── status glyphs (from voxtype pill) ──
+        # level meter — a row of vertical bars that FILLS left→right with the
+        # channel intensity. Bars up to the level are lit (vertical gradient),
+        # the leading bar tapers by the fractional part, the rest is faint track.
+        bar_w, gap = 3.4, 3.2
+        pitch = bar_w + gap
+        n = max(1, int((bw + gap) / pitch))
+        max_h = 17.0
+        lvl = max(0.0, min(1.0, lvl))
+        lit = lvl * n                               # how many bars are lit
+        top = QColor(color).lighter(165)            # bright tint at the top
+        base = QColor(color)
+        p.setPen(Qt.PenStyle.NoPen)
+        for i in range(n):
+            x = bx + i * pitch
+            # faint track behind every bar
+            p.setBrush(QBrush(QColor(255, 255, 255, 20)))
+            p.drawRoundedRect(QRectF(x, cy - 1.3, bar_w, 2.6), 1.1, 1.1)
+            frac = min(1.0, max(0.0, lit - i))       # this bar's lit fraction
+            if frac <= 0.02:
+                continue
+            h = max_h * (0.4 + 0.6 * frac)           # full height once fully lit; tapered head
+            grad = QLinearGradient(0.0, cy - h / 2, 0.0, cy + h / 2)
+            grad.setColorAt(0.0, top)
+            grad.setColorAt(1.0, base)
+            p.setBrush(QBrush(grad))
+            p.drawRoundedRect(QRectF(x, cy - h / 2, bar_w, h), 1.5, 1.5)
+
+    # ── status glyphs ──
 
     def _draw_status(self, p, cx, cy):
         s = self._state

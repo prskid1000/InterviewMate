@@ -76,7 +76,7 @@ class GeminiSTT:
     def __init__(self, base_url, api_key, model, language="en"):
         import httpx
         if not api_key:
-            raise RuntimeError("Gemini STT needs an API key")
+            raise RuntimeError("Gemini needs an API key — add it in Settings → STT (or set GEMINI_API_KEY in .env)")
         self.base = (base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
         self.key = api_key
         self.model = model or "gemini-2.5-flash-lite"

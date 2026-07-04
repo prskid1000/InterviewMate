@@ -25,6 +25,7 @@ class ProviderChain:
         self.max_tokens = int(cfg.get("max_tokens", 900))
         self.temperature = float(cfg.get("temperature", 0.4))
         self.disable_thinking = bool(cfg.get("disable_thinking", True))
+        self.thinking_tokens = int(cfg.get("thinking_tokens", 0))
         self.cooldown: dict[str, float] = {}
         self.entries: list[dict] = []
         for p in cfg.get("providers", []):
@@ -93,13 +94,28 @@ class ProviderChain:
                     raise RuntimeError(f"{e['name']} failed mid-answer: {ex}")
         raise RuntimeError("All AI providers failed — " + "; ".join(errors))
 
+    def _reasoning_effort(self):
+        """Generic reasoning knob for OpenAI-compatible endpoints (Gemini, o-series,
+        DeepSeek, …). None means don't send the param at all."""
+        if self.disable_thinking:
+            return "none"
+        t = self.thinking_tokens
+        if t <= 0:
+            return None
+        return "low" if t < 2048 else "medium" if t < 8192 else "high"
+
     def _stream_openai(self, e, messages, temp):
         kwargs = dict(model=e["model"], messages=messages, stream=True,
                       max_tokens=self.max_tokens, temperature=temp)
-        # Gemini 2.5 thinks by default — turn it off for lower latency.
-        if self.disable_thinking and "generativelanguage.googleapis" in e["base_url"]:
-            kwargs["reasoning_effort"] = "none"
-        resp = self._client(e).chat.completions.create(**kwargs)
+        eff = self._reasoning_effort()
+        try:
+            resp = self._client(e).chat.completions.create(
+                **({**kwargs, "reasoning_effort": eff} if eff else kwargs))
+        except Exception:
+            if not eff:
+                raise
+            # provider doesn't accept reasoning_effort — retry without it
+            resp = self._client(e).chat.completions.create(**kwargs)
         for chunk in resp:
             if not chunk.choices:
                 continue
@@ -111,10 +127,15 @@ class ProviderChain:
         system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
         conv = [{"role": m["role"], "content": m["content"]}
                 for m in messages if m["role"] in ("user", "assistant")]
-        with self._client(e).messages.stream(
-            model=e["model"], max_tokens=self.max_tokens, temperature=temp,
-            system=system or None, messages=conv,
-        ) as stream:
+        kwargs = dict(model=e["model"], max_tokens=self.max_tokens, temperature=temp,
+                      system=system or None, messages=conv)
+        # extended thinking with an explicit token budget (Anthropic requires
+        # max_tokens > budget and temperature = 1 while thinking).
+        if not self.disable_thinking and self.thinking_tokens > 0:
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": self.thinking_tokens}
+            kwargs["max_tokens"] = max(self.max_tokens, self.thinking_tokens + 512)
+            kwargs["temperature"] = 1.0
+        with self._client(e).messages.stream(**kwargs) as stream:
             for text in stream.text_stream:
                 if text:
                     yield text

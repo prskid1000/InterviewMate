@@ -41,18 +41,71 @@ class Copilot:
         self.active_profile = cfg_prof if cfg_prof in self.profiles else next(iter(self.profiles), None)
         self.chain = ProviderChain(CFG.get("llm", {}))
         self.stt = None
+        self._stt_error = None      # why STT failed to init, if it did
         self.audio = None
 
         self.recording = False
         self.rec_lock = threading.Lock()
         self.rec_bufs = {"interviewer": [], "candidate": []}
         self.rec_started = 0.0
-        self.max_rec = int(CFG.get("audio", {}).get("max_record_seconds", 180))
+        a = CFG.get("audio", {}) or {}
+        self.max_rec = int(a.get("max_record_seconds", 180))
+        self.auto_silence = bool(a.get("auto_silence", False))
+        self.silence_seconds = float(a.get("silence_seconds", 1.2))
+        self.speech_threshold = float(a.get("speech_threshold", 0.02))
+        self._last_speech = 0.0
 
-        self.transcript: list[dict] = []
-        self.exchanges: list[dict] = []
+        # sessions/tabs — each is an independent conversation with its own
+        # transcript + exchange history. The active session's context is what
+        # the AI answers from.
+        self._sid = 0
+        self.sessions: list[dict] = [self._blank_session()]
+        self.active = 0
         self.qid = 0
         self.cancel_event: threading.Event | None = None
+
+    def _blank_session(self, title: str | None = None) -> dict:
+        self._sid += 1
+        return {"id": self._sid, "title": title or f"Session {self._sid}",
+                "transcript": [], "exchanges": []}
+
+    # active-session proxies so the rest of the code is unchanged
+    @property
+    def transcript(self) -> list:
+        return self.sessions[self.active]["transcript"]
+
+    @property
+    def exchanges(self) -> list:
+        return self.sessions[self.active]["exchanges"]
+
+    def sessions_meta(self) -> list:
+        return [{"id": s["id"], "title": s["title"]} for s in self.sessions]
+
+    def _post_sessions(self):
+        self.post({"type": "sessions", "list": self.sessions_meta(), "active": self.active})
+
+    def _post_active(self):
+        self.post({"type": "session_activated", "active": self.active,
+                   "exchanges": list(self.exchanges)})
+
+    def new_session(self):
+        self.sessions.append(self._blank_session())
+        self.active = len(self.sessions) - 1
+        self._post_sessions(); self._post_active()
+
+    def switch_session(self, idx: int):
+        if 0 <= idx < len(self.sessions) and idx != self.active:
+            self.active = idx
+            self._post_sessions(); self._post_active()
+
+    def close_session(self, idx: int):
+        if len(self.sessions) <= 1 or not (0 <= idx < len(self.sessions)):
+            return
+        self.sessions.pop(idx)
+        self.active = min(self.active if idx > self.active else self.active - 1,
+                          len(self.sessions) - 1)
+        self.active = max(0, self.active)
+        self._post_sessions(); self._post_active()
 
     # ---------- lifecycle ----------
 
@@ -81,10 +134,12 @@ class Copilot:
         try:
             self.status("Preparing speech-to-text…")
             self.stt = make_stt(CFG.get("stt", {}))
+            self._stt_error = None
             self.status(f"Speech-to-text ready ({getattr(self.stt, 'device', '?')}).")
         except Exception as e:
             self.stt = None
-            self.status(f"STT unavailable: {e}", "error")
+            self._stt_error = str(e)
+            self.status(f"Speech-to-text backend unavailable: {e}", "error")
 
     def _init_audio(self):
         try:
@@ -115,6 +170,19 @@ class Copilot:
             self.levels_me.append(lvl)
         elif channel == "interviewer":
             self.levels_int.append(lvl)
+
+        # hands-free: auto start on speech, auto stop after a silence gap
+        if self.auto_silence:
+            now = time.time()
+            if lvl >= self.speech_threshold:
+                self._last_speech = now
+                if not self.recording:
+                    self.record_start()
+            elif self.recording and self._last_speech \
+                    and now - self.rec_started > 0.6 \
+                    and now - self._last_speech > self.silence_seconds:
+                self.record_stop()
+
         if not self.recording:
             return
         buf = self.rec_bufs.get(channel)
@@ -143,7 +211,10 @@ class Copilot:
 
     def _process_recording(self):
         if self.stt is None:
-            self.status("Speech model is not ready yet — wait a moment and retry.", "error")
+            if self._stt_error:
+                self.status(f"No speech-to-text backend — {self._stt_error}", "error")
+            else:
+                self.status("Speech-to-text is still starting up — try again in a moment.", "error")
             self.post({"type": "pipeline_idle"})
             return
         bufs = self.rec_bufs
@@ -157,7 +228,7 @@ class Copilot:
             if len(a_audio) >= MIN_SAMPLES:
                 atext = self.stt.transcribe(a_audio)
         except Exception as e:
-            self.status(f"Transcription failed: {e}", "error")
+            self.status(f"Transcription failed — {e}", "error")
             self.post({"type": "pipeline_idle"})
             return
         if not qtext and not atext:
@@ -206,6 +277,7 @@ class Copilot:
         prof = self.profiles.get(self.active_profile)
         if prof:
             system = profiles_mod.render(prof, CFG.get("vars", {}))
+            system += profiles_mod.context_block(self.active_profile)
             temp = (prof.get("meta") or {}).get("temperature")
         else:
             system = "You are a real-time interview assistant. Give concise, speakable answers."
@@ -233,7 +305,7 @@ class Copilot:
             self.post({"type": "answer_error", "qid": qid, "text": str(e)})
         self.post({"type": "answer_done", "qid": qid})
         # store even partial answers so follow-up questions keep full context
-        self.exchanges.append({"q": user, "a": "".join(acc)})
+        self.exchanges.append({"q": user, "a": "".join(acc), "qd": qtext or atext})
 
     def clear(self):
         self.transcript.clear()
@@ -252,7 +324,11 @@ class Copilot:
         p = CFG.get("profile")
         if p in self.profiles:
             self.active_profile = p
-        self.max_rec = int(CFG.get("audio", {}).get("max_record_seconds", 180))
+        a = CFG.get("audio", {}) or {}
+        self.max_rec = int(a.get("max_record_seconds", 180))
+        self.auto_silence = bool(a.get("auto_silence", False))
+        self.silence_seconds = float(a.get("silence_seconds", 1.2))
+        self.speech_threshold = float(a.get("speech_threshold", 0.02))
         threading.Thread(target=self._init_stt, daemon=True).start()
         self.status("Settings applied.")
         self.post({"type": "settings_applied"})
