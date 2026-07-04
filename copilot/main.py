@@ -2,12 +2,21 @@
 main thread. No system tray icon — the pill's right-click menu and the
 global hotkeys from config.yaml are the only chrome."""
 import os
+import sys
 import threading
 import webbrowser
 
 import uvicorn
 
 from .config import CFG
+
+# Under pythonw.exe (no console — e.g. launched from a Scheduled Task at logon)
+# sys.stdout/sys.stderr are None, so any print() or uvicorn log write crashes the
+# startup. Route them to a null sink so the app runs headless cleanly.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 
 def _to_pynput(combo: str) -> str:
