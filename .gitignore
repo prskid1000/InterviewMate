@@ -26,3 +26,6 @@ models/
 Thumbs.db
 .idea/
 .vscode/
+
+# Local config (auto-generated on first run; may hold inline API keys)
+config.yaml
