@@ -463,9 +463,9 @@ class SettingsWindow(QWidget):
         self.disable_thinking = QCheckBox("Disable model thinking (faster answers, any provider)")
         gen.add(self.disable_thinking)
         self.thinking_tokens = QSpinBox(); self.thinking_tokens.setRange(0, 32768); self.thinking_tokens.setSingleStep(256)
-        self.thinking_tokens.setSpecialValueText("provider default")
+        self.thinking_tokens.setSuffix(" tokens")
         gen.add(_row("Thinking tokens", self.thinking_tokens,
-                     "Budget when thinking is ON (ignored if disabled above)."))
+                     "Budget when thinking is ON. 0 = provider default. Ignored if disabled above."))
         c2, b2 = _card("Options"); b2.addWidget(gen)
         lay.addWidget(c2); lay.addStretch(1)
         return scroll

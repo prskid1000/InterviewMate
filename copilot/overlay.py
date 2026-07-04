@@ -245,18 +245,36 @@ class SessionTabs(QWidget):
                 w.deleteLater()
         closable = len(sessions) > 1
         for i, s in enumerate(sessions):
+            on = (i == active)
+            bg = "#1b2740" if on else "rgba(255,255,255,0.04)"
+            fg = "#dce6f7" if on else "#8a96aa"
+            bd = "#3a568c" if on else "#232c3a"
+            # tab = title button (+ a small × to close, when >1 session)
+            wrap = QWidget()
+            wl = QHBoxLayout(wrap); wl.setContentsMargins(0, 0, 0, 0); wl.setSpacing(0)
             tab = QPushButton(s.get("title", f"Session {i+1}"))
             tab.setCursor(Qt.CursorShape.PointingHandCursor)
-            on = (i == active)
-            tab.setStyleSheet(self._TAB.format(
-                bg="#1b2740" if on else "rgba(255,255,255,0.04)",
-                fg="#dce6f7" if on else "#8a96aa",
-                bd="#3a568c" if on else "#232c3a"))
+            rad = "border-radius:7px;" if not closable else \
+                  "border-top-left-radius:7px;border-bottom-left-radius:7px;"
+            tab.setStyleSheet(
+                f"QPushButton{{background:{bg};color:{fg};border:1px solid {bd};{rad}"
+                f"border-right:{'1px' if not closable else '0'} solid {bd};"
+                "padding:3px 10px;font:600 11px 'Segoe UI';}"
+                "QPushButton:hover{color:#dce6f7;}")
             tab.clicked.connect(lambda _=False, k=i: self._on_switch(k))
+            wl.addWidget(tab)
             if closable:
-                tab.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-                tab.customContextMenuRequested.connect(lambda _p, k=i: self._on_close(k))
-            self._lay.addWidget(tab)
+                x = QPushButton("×")
+                x.setCursor(Qt.CursorShape.PointingHandCursor)
+                x.setToolTip("Close session")
+                x.setStyleSheet(
+                    f"QPushButton{{background:{bg};color:#7c8aa5;border:1px solid {bd};border-left:0;"
+                    "border-top-right-radius:7px;border-bottom-right-radius:7px;"
+                    "padding:3px 7px 3px 3px;font:700 12px 'Segoe UI';}"
+                    "QPushButton:hover{color:#f87171;}")
+                x.clicked.connect(lambda _=False, k=i: self._on_close(k))
+                wl.addWidget(x)
+            self._lay.addWidget(wrap)
         plus = QPushButton("＋")
         plus.setCursor(Qt.CursorShape.PointingHandCursor)
         plus.setToolTip("New session")

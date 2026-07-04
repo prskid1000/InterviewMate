@@ -95,7 +95,13 @@ class GeminiSTT:
                 {"text": prompt}]}],
                 "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}},
         )
-        r.raise_for_status()
+        if r.status_code != 200:
+            # surface Gemini's real reason (invalid key / model / payload)
+            try:
+                msg = r.json().get("error", {}).get("message", "") or r.text
+            except Exception:
+                msg = r.text
+            raise RuntimeError(f"HTTP {r.status_code} — {msg.strip()[:300]}")
         data = r.json()
         try:
             parts = data["candidates"][0]["content"]["parts"]
@@ -126,6 +132,14 @@ class SttChain:
 
     def _build(self, spec):
         t = spec["api_type"]
+        base = spec["base_url"]
+        # Gemini has no OpenAI-style /audio/transcriptions endpoint — always use
+        # the native generateContent path, whatever api_type was picked. This
+        # prevents a 404 when a Gemini base is added as an "openai" provider.
+        if "generativelanguage.googleapis" in base:
+            native = base.split("/openai")[0].rstrip("/")   # .../v1beta/openai/ -> .../v1beta
+            return GeminiSTT(native, spec["key"], spec["model"] or "gemini-2.5-flash-lite",
+                             language=self.language)
         if t == "local":
             return LocalSTT(model=spec["model"] or "base", language=self.language)
         if t == "openai":
@@ -147,7 +161,7 @@ class SttChain:
                     self.device = getattr(spec["backend"], "device", spec["name"])
                 return spec["backend"].transcribe(audio)
             except Exception as ex:
-                errors.append(f"{spec['name']}: {type(ex).__name__}: {str(ex)[:100]}")
+                errors.append(f"{spec['name']}: {str(ex)[:300]}")
         raise RuntimeError("All STT providers failed — " + "; ".join(errors))
 
 
