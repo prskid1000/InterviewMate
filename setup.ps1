@@ -5,7 +5,7 @@
 .DESCRIPTION
     Creates a single venv (.venv), installs the Python deps
     (PySide6 + PyAudioWPatch + faster-whisper + fastapi + openai + …),
-    pre-downloads the local Whisper STT model (base.en, CPU), seeds a .env
+    pre-downloads the local Whisper STT model (large-v3, CPU), seeds a .env
     template, and registers a scheduled task `InterviewMate` that auto-starts
     at logon (hidden, via pythonw).
 
@@ -15,7 +15,7 @@
 .PARAMETER InstallDir
     Repo / install root. Defaults to ~/.interview. Must contain copilot/.
 .PARAMETER PreloadModel
-    Download the Whisper base.en model now (~141 MB) instead of lazily on the
+    Download the Whisper large-v3 model now (~1.5 GB) instead of lazily on the
     first transcription. Default $true.
 .PARAMETER RegisterTask
     Register + start the `InterviewMate` logon task. Default $true.
@@ -103,20 +103,20 @@ if (-not (Test-Path "$venv\Lib\site-packages\pyaudiowpatch")) { Fail "PyAudioWPa
 if (-not (Test-Path "$venv\Lib\site-packages\fastapi"))     { Fail "fastapi install failed (server)" }
 Ok "Core deps installed (UI + local Whisper STT + capture + server)"
 
-# ─── Pre-download the local STT model (base.en, CPU) ─────────────────
+# ─── Pre-download the local STT model (large-v3, CPU) ────────────────
 
 if ($PreloadModel) {
-    Step "Pre-downloading local Whisper model (base.en, ~141 MB, CPU)"
+    Step "Pre-downloading local Whisper model (large-v3, ~1.5 GB, CPU)"
     $rc = & $venvPy -c @"
 import sys
 try:
     from faster_whisper import WhisperModel
-    WhisperModel('base.en', device='cpu', compute_type='int8')
+    WhisperModel('large-v3', device='cpu', compute_type='int8')
     print('ok')
 except Exception as e:
     print('skip:', e, file=sys.stderr); sys.exit(1)
 "@ 2>&1
-    if ($LASTEXITCODE -eq 0) { Ok "Whisper base.en cached" }
+    if ($LASTEXITCODE -eq 0) { Ok "Whisper large-v3 cached" }
     else { Warn "Model pre-download failed (downloads lazily on first use): $rc" }
 }
 
@@ -187,7 +187,7 @@ Write-Host @"
   InterviewMate is running as a frameless overlay (hidden from screen
   recording / share by default). It auto-starts at every logon.
 
-  - Transcription: local Whisper (base.en, CPU) — offline, no API key.
+  - Transcription: local Whisper (large-v3, CPU) — offline, no API key.
   - AI answers: add a Gemini/Groq key in Settings, or .env (GEMINI_API_KEY).
 
   Hotkeys (global):

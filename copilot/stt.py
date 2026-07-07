@@ -36,11 +36,13 @@ def _wav_bytes(audio: np.ndarray) -> bytes:
 
 
 class LocalSTT:
-    """Offline faster-whisper, CPU only. Default model base.en — the accuracy/
-    latency sweet spot on CPU (~0.7s for a short clip) and portable to any
-    laptop (no GPU/CUDA, no API key). The model is loaded + warmed at init."""
+    """Offline faster-whisper, CPU only (no GPU/CUDA, no API key — portable to
+    any laptop). Default large-v3 — the most accurate Whisper model, chosen for
+    accuracy over speed. On CPU it runs SLOWER than realtime (many seconds per
+    segment); that's the accepted tradeoff. Drop to small.en / distil-small.en
+    (via config stt.model) for lower latency. Loaded + warmed at init."""
 
-    def __init__(self, model="base.en", language="en"):
+    def __init__(self, model="large-v3", language="en"):
         from faster_whisper import WhisperModel
         self.language = language or None
         self.lock = threading.Lock()
@@ -170,7 +172,7 @@ class SttChain:
 
 
 def make_stt(cfg: dict):
-    """STT is fixed to local CPU Whisper (base.en) — offline, no API key,
+    """STT is fixed to local CPU Whisper (large-v3) — offline, no API key,
     portable. The cloud STT classes above are kept for reference but unused."""
     cfg = cfg or {}
-    return LocalSTT(model=cfg.get("model", "base.en"), language=cfg.get("language", "en"))
+    return LocalSTT(model=cfg.get("model", "large-v3"), language=cfg.get("language", "en"))

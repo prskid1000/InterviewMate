@@ -14,7 +14,11 @@ CONFIG_PATH = ROOT / "config.yaml"
 # Written on first run if config.yaml is missing, so a fresh clone works with no
 # setup and config.yaml can stay gitignored (keys never get committed).
 DEFAULT_CONFIG = {
-    "stt": {"language": "en"},   # transcription is local Whisper (CPU) — no key
+    # transcription is local Whisper (CPU) — no key. large-v3 = most accurate
+    # Whisper model (user prioritised accuracy over speed). It runs SLOWER than
+    # realtime on CPU (many seconds per segment) — that's expected. For lower
+    # latency drop to small.en / distil-small.en via this stt.model key.
+    "stt": {"language": "en", "model": "large-v3"},
     "overlay": {"enabled": True, "exclude_from_capture": True, "opacity": 1.0},
     "hotkeys": {
         "record_toggle": "ctrl+space", "open_config": "ctrl+alt+c",

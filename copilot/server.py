@@ -167,10 +167,13 @@ class Copilot:
         try:
             self.status("Loading local speech model (CPU)…")
             from .stt import LocalSTT
-            lang = (CFG.get("stt", {}) or {}).get("language", "en")
+            stt_cfg = CFG.get("stt", {}) or {}
+            lang = stt_cfg.get("language", "en")
+            model = stt_cfg.get("model", "large-v3")
+            self.status(f"Loading local speech model '{model}' (CPU)…")
             # two instances so both channels transcribe truly in parallel
-            self.stt_int = LocalSTT(model="base.en", language=lang)
-            self.stt_me = LocalSTT(model="base.en", language=lang)
+            self.stt_int = LocalSTT(model=model, language=lang)
+            self.stt_me = LocalSTT(model=model, language=lang)
             self.stt = self.stt_me     # back-compat alias
             self._stt_error = None
             threading.Thread(target=self._seg_worker, args=("interviewer", self._q_int, self.stt_int),
