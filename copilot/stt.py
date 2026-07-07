@@ -35,30 +35,82 @@ def _wav_bytes(audio: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
-class LocalSTT:
-    """Offline faster-whisper, CPU only (no GPU/CUDA, no API key — portable to
-    any laptop). Default large-v3 — the most accurate Whisper model, chosen for
-    accuracy over speed. On CPU it runs SLOWER than realtime (many seconds per
-    segment); that's the accepted tradeoff. Drop to small.en / distil-small.en
-    (via config stt.model) for lower latency. Loaded + warmed at init."""
+_CUDA_DLL_READY = False
 
-    def __init__(self, model="large-v3", language="en"):
+
+def _ensure_cuda_dll_path():
+    """Windows: register the pip-installed CUDA 12 runtime DLL directories
+    (nvidia-cublas-cu12 / nvidia-cudnn-cu12 / nvidia-cuda-nvrtc-cu12) so
+    ctranslate2 can load cublas64_12.dll etc. at runtime. os.add_dll_directory
+    alone isn't enough — ctranslate2 loads cuBLAS via the classic search path,
+    so we also prepend the dirs to PATH. Idempotent."""
+    global _CUDA_DLL_READY
+    if _CUDA_DLL_READY:
+        return
+    try:
+        import nvidia
+        base = list(getattr(nvidia, "__path__", []) or [])
+    except Exception:
+        base = []
+    dirs = []
+    if base:
+        for sub in ("cublas", "cudnn", "cuda_nvrtc", "cuda_runtime"):
+            d = os.path.join(base[0], sub, "bin")
+            if os.path.isdir(d):
+                dirs.append(d)
+                try:
+                    os.add_dll_directory(d)
+                except Exception:
+                    pass
+    if dirs:
+        os.environ["PATH"] = os.pathsep.join(dirs) + os.pathsep + os.environ.get("PATH", "")
+    _CUDA_DLL_READY = True
+
+
+class LocalSTT:
+    """Offline faster-whisper. Default large-v3 on the GPU (device="cuda",
+    float16): large-v3 accuracy AND far faster than realtime (~13x on an
+    RTX 5070 Ti after a one-time kernel JIT absorbed by the init warm-up). If
+    CUDA is unavailable (no GPU / missing CUDA libs / OOM), it falls back to CPU
+    int8 automatically (functional but slow for large-v3 — set a smaller
+    stt.model for CPU-only machines). No API key. Loaded + warmed at init."""
+
+    def __init__(self, model="large-v3", language="en", device="cuda",
+                 compute_type=None, beam_size=5):
         from faster_whisper import WhisperModel
         self.language = language or None
+        self.beam_size = int(beam_size)
         self.lock = threading.Lock()
-        self.model = WhisperModel(model, device="cpu", compute_type="int8")
-        self.device = "cpu"
-        # warm up so the first real transcription isn't slow
+        self.fallback_reason = None
+
+        def _build(dev, ct):
+            if dev == "cuda":
+                _ensure_cuda_dll_path()
+            m = WhisperModel(model, device=dev, compute_type=ct)
+            # warm up — forces the CUDA kernel JIT and surfaces any missing-lib
+            # error NOW (at init) so we can fall back cleanly, not mid-interview
+            list(m.transcribe(np.zeros(16000, np.float32),
+                              language=self.language, beam_size=1)[0])
+            return m
+
+        want_dev = (device or "cuda").lower()
+        want_ct = compute_type or ("float16" if want_dev == "cuda" else "int8")
         try:
-            list(self.model.transcribe(np.zeros(8000, np.float32),
-                                       language=self.language, beam_size=1)[0])
-        except Exception:
-            pass
+            self.model = _build(want_dev, want_ct)
+            self.device, self.compute_type = want_dev, want_ct
+        except Exception as e:
+            if want_dev == "cuda":
+                self.fallback_reason = str(e)
+                self.model = _build("cpu", "int8")     # GPU unavailable → CPU
+                self.device, self.compute_type = "cpu", "int8"
+            else:
+                raise
 
     def transcribe(self, audio: np.ndarray) -> str:
         with self.lock:
             segments, _ = self.model.transcribe(
-                audio, language=self.language, beam_size=1, vad_filter=True)
+                audio, language=self.language, beam_size=self.beam_size,
+                vad_filter=True)
             return " ".join(s.text.strip() for s in segments).strip()
 
 
@@ -172,7 +224,10 @@ class SttChain:
 
 
 def make_stt(cfg: dict):
-    """STT is fixed to local CPU Whisper (large-v3) — offline, no API key,
-    portable. The cloud STT classes above are kept for reference but unused."""
+    """STT is local Whisper (large-v3 on GPU, CPU fallback) — offline, no API
+    key. The cloud STT classes above are kept for reference but unused."""
     cfg = cfg or {}
-    return LocalSTT(model=cfg.get("model", "large-v3"), language=cfg.get("language", "en"))
+    return LocalSTT(model=cfg.get("model", "large-v3"), language=cfg.get("language", "en"),
+                    device=cfg.get("device", "cuda"),
+                    compute_type=cfg.get("compute_type"),
+                    beam_size=cfg.get("beam_size", 5))

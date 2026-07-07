@@ -14,11 +14,14 @@ CONFIG_PATH = ROOT / "config.yaml"
 # Written on first run if config.yaml is missing, so a fresh clone works with no
 # setup and config.yaml can stay gitignored (keys never get committed).
 DEFAULT_CONFIG = {
-    # transcription is local Whisper (CPU) — no key. large-v3 = most accurate
-    # Whisper model (user prioritised accuracy over speed). It runs SLOWER than
-    # realtime on CPU (many seconds per segment) — that's expected. For lower
-    # latency drop to small.en / distil-small.en via this stt.model key.
-    "stt": {"language": "en", "model": "large-v3"},
+    # transcription is local Whisper — no key. GPU mode: large-v3 on CUDA
+    # (float16) = large-v3 accuracy AND ~13x realtime (needs an NVIDIA GPU +
+    # nvidia-cublas-cu12 / nvidia-cudnn-cu12). Falls back to CPU int8 if CUDA is
+    # unavailable (functional but slow for large-v3 — set model=small.en for
+    # CPU-only machines). (Audio preprocessing was tried and reverted — it hurt
+    # accuracy; Whisper prefers the raw signal.)
+    "stt": {"language": "en", "model": "large-v3", "device": "cuda",
+            "compute_type": "float16", "beam_size": 5},
     "overlay": {"enabled": True, "exclude_from_capture": True, "opacity": 1.0},
     "hotkeys": {
         "record_toggle": "ctrl+space", "open_config": "ctrl+alt+c",

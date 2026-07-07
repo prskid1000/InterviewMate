@@ -1,6 +1,11 @@
 faster-whisper>=1.0.0
 PyAudioWPatch>=0.2.12.7
 numpy
+# GPU (CUDA 12) runtime for faster-whisper/ctranslate2 — enables large-v3 on the
+# GPU. Harmless on CPU-only machines (unused; app falls back to CPU int8).
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
+nvidia-cuda-nvrtc-cu12
 fastapi
 uvicorn[standard]
 openai>=1.40.0

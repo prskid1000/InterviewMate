@@ -170,18 +170,23 @@ class Copilot:
             stt_cfg = CFG.get("stt", {}) or {}
             lang = stt_cfg.get("language", "en")
             model = stt_cfg.get("model", "large-v3")
-            self.status(f"Loading local speech model '{model}' (CPU)…")
+            device = stt_cfg.get("device", "cuda")
+            ctype = stt_cfg.get("compute_type") or ("float16" if device == "cuda" else "int8")
+            beam = stt_cfg.get("beam_size", 5)
+            self.status(f"Loading speech model '{model}' on {device} ({ctype}, beam={beam})…")
             # two instances so both channels transcribe truly in parallel
-            self.stt_int = LocalSTT(model=model, language=lang)
-            self.stt_me = LocalSTT(model=model, language=lang)
+            self.stt_int = LocalSTT(model=model, language=lang, device=device, compute_type=ctype, beam_size=beam)
+            self.stt_me = LocalSTT(model=model, language=lang, device=device, compute_type=ctype, beam_size=beam)
             self.stt = self.stt_me     # back-compat alias
             self._stt_error = None
+            if device == "cuda" and self.stt_int.device != "cuda":
+                self.status(f"GPU unavailable — using CPU (slow for {model}). {self.stt_int.fallback_reason}", "error")
             threading.Thread(target=self._seg_worker, args=("interviewer", self._q_int, self.stt_int),
                              daemon=True, name="stt-interviewer").start()
             threading.Thread(target=self._seg_worker, args=("candidate", self._q_me, self.stt_me),
                              daemon=True, name="stt-candidate").start()
             mode = "Auto-answer on." if self.auto_silence else "Press the hotkey to ask."
-            self.status(f"Listening — local Whisper (CPU). {mode}")
+            self.status(f"Listening — Whisper {model} on {self.stt_int.device.upper()}. {mode}")
         except Exception as e:
             self.stt = self.stt_int = self.stt_me = None
             self._stt_error = str(e)

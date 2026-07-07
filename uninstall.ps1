@@ -66,7 +66,7 @@ if ($present) {
 $hub = Join-Path $env:USERPROFILE ".cache\huggingface\hub"
 $whisper = Join-Path $hub "models--Systran--faster-whisper-large-v3"
 if (Test-Path $whisper) {
-    $confirm = Read-Host "  Delete the cached Whisper model at $whisper (~1.5 GB)? (y/N)"
+    $confirm = Read-Host "  Delete the cached Whisper model at $whisper (~2.9 GB)? (y/N)"
     if ($confirm -eq 'y') {
         Remove-Item -Recurse -Force $whisper -ErrorAction SilentlyContinue
         Ok "Removed cached model"

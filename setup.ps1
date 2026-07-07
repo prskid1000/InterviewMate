@@ -4,18 +4,21 @@
     InterviewMate Setup — real-time interview assistant overlay for Windows.
 .DESCRIPTION
     Creates a single venv (.venv), installs the Python deps
-    (PySide6 + PyAudioWPatch + faster-whisper + fastapi + openai + …),
-    pre-downloads the local Whisper STT model (large-v3, CPU), seeds a .env
+    (PySide6 + PyAudioWPatch + faster-whisper + CUDA 12 runtime + fastapi + …),
+    pre-downloads the local Whisper STT model (large-v3), seeds a .env
     template, and registers a scheduled task `InterviewMate` that auto-starts
     at logon (hidden, via pythonw).
 
-    Transcription is 100% local (faster-whisper on CPU — no GPU, no API key).
+    Transcription is 100% local (faster-whisper, no API key). It runs large-v3
+    on an NVIDIA GPU (CUDA, float16) for large-v3 accuracy at ~13x realtime, and
+    falls back to CPU int8 automatically if no GPU is present (functional but
+    slow for large-v3 — set stt.model=small.en in config.yaml for CPU-only PCs).
     Only the AI answer needs a provider key (Gemini / Groq), which you add in
     the app's Settings -> AI Model, or in .env (GEMINI_API_KEY=...).
 .PARAMETER InstallDir
     Repo / install root. Defaults to ~/.interview. Must contain copilot/.
 .PARAMETER PreloadModel
-    Download the Whisper large-v3 model now (~1.5 GB) instead of lazily on the
+    Download the Whisper large-v3 model now (~2.9 GB) instead of lazily on the
     first transcription. Default $true.
 .PARAMETER RegisterTask
     Register + start the `InterviewMate` logon task. Default $true.
@@ -101,20 +104,42 @@ if (-not (Test-Path "$venv\Lib\site-packages\PySide6"))     { Fail "PySide6 inst
 if (-not (Test-Path "$venv\Lib\site-packages\faster_whisper")) { Fail "faster-whisper install failed (local STT)" }
 if (-not (Test-Path "$venv\Lib\site-packages\pyaudiowpatch")) { Fail "PyAudioWPatch install failed (WASAPI capture)" }
 if (-not (Test-Path "$venv\Lib\site-packages\fastapi"))     { Fail "fastapi install failed (server)" }
+if (-not (Test-Path "$venv\Lib\site-packages\nvidia\cublas")) { Warn "nvidia-cublas-cu12 missing — GPU disabled, STT will use CPU (slow for large-v3)" }
 Ok "Core deps installed (UI + local Whisper STT + capture + server)"
 
-# ─── Pre-download the local STT model (large-v3, CPU) ────────────────
+# ─── GPU check ───────────────────────────────────────────────────────
+
+Step "Checking for an NVIDIA GPU (CUDA)"
+$gpu = & $venvPy -c @"
+try:
+    import ctranslate2 as c
+    n = c.get_cuda_device_count()
+    print('cuda' if n > 0 else 'cpu')
+except Exception:
+    print('cpu')
+"@ 2>&1
+if ("$gpu".Trim() -eq 'cuda') { Ok "CUDA GPU detected — large-v3 will run on the GPU (float16)" }
+else { Warn "No CUDA GPU — STT falls back to CPU. large-v3 is slow on CPU; consider stt.model=small.en in config.yaml" }
+
+# ─── Pre-download the local STT model (large-v3) ─────────────────────
 
 if ($PreloadModel) {
-    Step "Pre-downloading local Whisper model (large-v3, ~1.5 GB, CPU)"
+    Step "Pre-downloading local Whisper model (large-v3, ~2.9 GB)"
+    # Sets a socket timeout so a stalled connection errors + retries instead of
+    # hanging forever. Loads on CPU int8 only to cache the weights (fast); the
+    # app loads them on GPU float16 at runtime.
     $rc = & $venvPy -c @"
-import sys
-try:
-    from faster_whisper import WhisperModel
-    WhisperModel('large-v3', device='cpu', compute_type='int8')
-    print('ok')
-except Exception as e:
-    print('skip:', e, file=sys.stderr); sys.exit(1)
+import os, sys, time
+os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '30')
+from faster_whisper import WhisperModel
+for attempt in range(1, 6):
+    try:
+        WhisperModel('large-v3', device='cpu', compute_type='int8')
+        print('ok'); break
+    except Exception as e:
+        print('retry %d: %s' % (attempt, e), file=sys.stderr); time.sleep(3)
+else:
+    sys.exit(1)
 "@ 2>&1
     if ($LASTEXITCODE -eq 0) { Ok "Whisper large-v3 cached" }
     else { Warn "Model pre-download failed (downloads lazily on first use): $rc" }
@@ -187,7 +212,7 @@ Write-Host @"
   InterviewMate is running as a frameless overlay (hidden from screen
   recording / share by default). It auto-starts at every logon.
 
-  - Transcription: local Whisper (large-v3, CPU) — offline, no API key.
+  - Transcription: local Whisper large-v3 (GPU/CUDA, CPU fallback) — offline, no API key.
   - AI answers: add a Gemini/Groq key in Settings, or .env (GEMINI_API_KEY).
 
   Hotkeys (global):
