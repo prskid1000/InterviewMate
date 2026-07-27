@@ -5,18 +5,52 @@ Each provider in config is fully custom:
 
 Providers are tried top-first; a provider that fails before emitting any text
 falls through to the next. Works with any OpenAI-compatible endpoint (Gemini,
-Groq, OpenRouter, OpenAI, Ollama, vLLM, …) or any Anthropic-compatible endpoint.
+Groq, OpenRouter, OpenAI, Ollama, vLLM, …) or any Anthropic-compatible endpoint
+— including local ones like telecode's dual-protocol proxy on 127.0.0.1:1235.
+
+Local endpoints get a fast TCP preflight (see `local_endpoint_up`) so a
+side-app that simply isn't running is skipped instantly instead of stalling an
+answer, which is what makes "put the local one on top" safe.
 """
 import os
+import socket
 import time
+from urllib.parse import urlparse
 
 from openai import OpenAI, RateLimitError
 
 COOLDOWN_S = 60
+LOCAL_PROBE_S = 0.4     # bounded: a closed local port DROPS the SYN here
+LOCAL_TIMEOUT_S = 90    # per-request cap for local endpoints (SDK default: 600 s + retries)
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 
 
 def _resolve_key(entry: dict) -> str:
     return (entry.get("api_key") or os.getenv(entry.get("api_key_env", "") or "") or "").strip()
+
+
+def is_local(base_url: str) -> bool:
+    try:
+        return (urlparse(base_url).hostname or "").lower() in _LOCAL_HOSTS
+    except Exception:
+        return False
+
+
+def local_endpoint_up(base_url: str, timeout: float = LOCAL_PROBE_S) -> bool:
+    """Is anything listening on a local base_url? Local side-apps (telecode's
+    proxy, an Ollama, …) are often just not running, and on Windows a closed
+    port drops the SYN rather than refusing — so the SDKs would retry for
+    minutes. Probe first, skip the entry if it's dark."""
+    u = urlparse(base_url)
+    host = (u.hostname or "127.0.0.1").lower()
+    if host in ("localhost", "0.0.0.0"):
+        host = "127.0.0.1"      # avoid the IPv6-then-IPv4 double wait
+    port = u.port or (443 if u.scheme == "https" else 80)
+    try:
+        socket.create_connection((host, port), timeout=timeout).close()
+        return True
+    except OSError:
+        return False
 
 
 class ProviderChain:
@@ -41,6 +75,7 @@ class ProviderChain:
             self.entries.append({
                 "name": name, "model": model, "api_type": api_type,
                 "base_url": base_url, "key": key, "client": None,
+                "local": is_local(base_url),
             })
 
     def available(self) -> list[str]:
@@ -49,11 +84,15 @@ class ProviderChain:
     def _client(self, e: dict):
         if e["client"] is not None:
             return e["client"]
+        # a local endpoint that hangs must not eat the interview — bound it and
+        # let the chain fall through instead of retrying
+        kw = {"timeout": LOCAL_TIMEOUT_S, "max_retries": 0} if e["local"] else {}
         if e["api_type"] == "anthropic":
             import anthropic
-            e["client"] = anthropic.Anthropic(api_key=e["key"] or "none", base_url=e["base_url"])
+            e["client"] = anthropic.Anthropic(api_key=e["key"] or "none",
+                                              base_url=e["base_url"], **kw)
         else:
-            e["client"] = OpenAI(base_url=e["base_url"], api_key=e["key"] or "none")
+            e["client"] = OpenAI(base_url=e["base_url"], api_key=e["key"] or "none", **kw)
         return e["client"]
 
     def stream(self, messages, temperature=None):
@@ -68,6 +107,9 @@ class ProviderChain:
         for e in self.entries:
             if time.time() < self.cooldown.get(e["name"], 0):
                 errors.append(f"{e['name']}: cooling down after a rate limit")
+                continue
+            if e["local"] and not local_endpoint_up(e["base_url"]):
+                errors.append(f"{e['name']}: not running ({e['base_url']})")
                 continue
             yielded = False
             try:

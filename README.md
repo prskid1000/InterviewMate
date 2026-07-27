@@ -107,12 +107,23 @@ questions manually.
 
 ## Settings (Ctrl + Alt + C)
 
-- **Speech-to-text** — add transcription providers. Types: `openai` (any
-  `/audio/transcriptions` endpoint, e.g. Groq/OpenAI Whisper) or `gemini`
-  (Gemini `generateContent` with inline audio). Tried top-first.
+- **Speech** — which engine transcribes. Both are offline, no key:
+  - **Auto** (default) — use VoxType if its OpenAI HTTP server is up on
+    `127.0.0.1:6600`, otherwise load our own model. VoxType
+    already keeps Whisper resident on the GPU, so borrowing it means no second
+    copy in VRAM and no model-load wait at startup. If VoxType disappears
+    mid-session, transcription switches to the built-in model automatically.
+  - **VoxType API only** — never load a local model; error if VoxType is down.
+  - **Built-in model only** — always load faster-whisper (`large-v3` on CUDA
+    float16, automatic CPU int8 fallback; use `small.en` on CPU-only machines).
+  Hit **Test** next to the URL to check VoxType before an interview.
 - **AI Model** — add answer providers. Types: `openai` (any OpenAI-compatible
   chat endpoint) or `anthropic` (Claude `/messages`). Tick to enable, reorder
   with ↑/↓; a rate-limited provider falls through to the next.
+  A **local** endpoint (`127.0.0.1`) — such as the **Telecode local (llama.cpp)**
+  preset, telecode's Anthropic-compatible proxy on `:1235` — is a good top
+  entry: no quota, no cost, and if telecode isn't running it's skipped in ~0.4 s
+  and the next provider answers.
 - **Interview** — active profile, role/subject, the **Persona** box (how it
   responds), and your resume + job description.
 - **Hotkeys** — rebind any shortcut.
@@ -128,10 +139,10 @@ carry its own inline key, or reference an environment variable (`api_key_env`).
 
 - **Gemini** free tier is small and **per-model** (~20 requests/day for
   `gemini-2.5-flash`). The defaults use `gemini-2.5-flash-lite` (its own quota).
-  Because STT and answers can share one model, you'll exhaust it quickly.
-- **Groq** free tier is far more generous (~14,400 chat req/day, ~2,000 audio
-  req/day). For real practice, get a free key at https://console.groq.com/keys,
-  paste it into the Groq provider rows (Speech + AI Model) and tick them.
+  Transcription is local, so the quota is spent on answers only.
+- **Groq** free tier is far more generous (~14,400 chat req/day). For real
+  practice, get a free key at https://console.groq.com/keys, paste it into the
+  Groq row under **AI Model** and tick it.
 
 ---
 
@@ -139,14 +150,15 @@ carry its own inline key, or reference an environment variable (`api_key_env`).
 
 ```
 [System audio (loopback)] → "interviewer" ┐
-                                           ├─ record (manual) → transcribe (STT chain)
+                                           ├─ transcribe (VoxType API or local Whisper)
 [Microphone]              → "you"          ┘        → profile + persona + session history
                                                     → AI chain (OpenAI/Anthropic, fallback)
                                                     → streamed answer in the overlay
 ```
 
-Everything except the AI/STT API calls runs locally. Only transcribed text and
-your resume/JD context are sent to the configured providers.
+Audio never leaves the machine — transcription is local either way (VoxType is
+also on `127.0.0.1`). Only transcribed text and your resume/JD context are sent
+to the configured AI provider.
 
 ## Configuration file
 

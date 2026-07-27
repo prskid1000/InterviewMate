@@ -2,7 +2,8 @@
 
 Flow (always-on, dual-channel):
   Both channels are continuously VAD-segmented and transcribed live, in
-  parallel (loopback=interviewer, mic=me), by local CPU Whisper. Transcription
+  parallel (loopback=interviewer, mic=me), by whichever speech engine `stt`
+  selects — VoxType's API or our own Whisper (see stt.make_stt). Transcription
   is IDENTICAL in manual and auto mode — the only difference is WHEN we send to
   the LLM: auto = when the interviewer finishes a question; manual = when you
   hit the hotkey. History records YOUR actual spoken response as the answer of
@@ -22,7 +23,7 @@ from fastapi.responses import HTMLResponse
 from . import profiles as profiles_mod
 from .config import CFG, ROOT
 from .llm import ProviderChain
-from .stt import make_stt
+from .stt import make_stt, voxtype_probe
 
 app = FastAPI()
 
@@ -71,6 +72,8 @@ class Copilot:
         # two parallel STT engines, one per channel
         self.stt_int = None
         self.stt_me = None
+        self._stt_cfg_key = None    # detects a real STT settings change
+        self._failing_over = False  # one VoxType→local swap at a time
         self._q_int: queue.Queue = queue.Queue()
         self._q_me: queue.Queue = queue.Queue()
         # per-channel VAD segmenter state
@@ -163,34 +166,49 @@ class Copilot:
         self._init_stt()
         self._init_audio()
 
+    def _stt_key(self) -> str:
+        return json.dumps(CFG.get("stt", {}) or {}, sort_keys=True)
+
+    def _stt_label(self) -> str:
+        dev = getattr(self.stt_int, "device", "?")
+        if dev == "voxtype":
+            return "VoxType speech API"
+        model = (CFG.get("stt", {}) or {}).get("model", "large-v3")
+        return f"Whisper {model} on {dev.upper()}"
+
     def _init_stt(self):
+        """Build both channels' backends — VoxType's API when it's up, otherwise
+        our own Whisper (`stt.engine` decides; see stt.make_stt). Safe to call
+        again after a settings change: the segment workers start only once and
+        read the current backend per segment."""
+        stt_cfg = CFG.get("stt", {}) or {}
+        self._stt_cfg_key = self._stt_key()
         try:
-            self.status("Loading local speech model (CPU)…")
-            from .stt import LocalSTT
-            stt_cfg = CFG.get("stt", {}) or {}
-            lang = stt_cfg.get("language", "en")
-            model = stt_cfg.get("model", "large-v3")
-            device = stt_cfg.get("device", "cuda")
-            ctype = stt_cfg.get("compute_type") or ("float16" if device == "cuda" else "int8")
-            beam = stt_cfg.get("beam_size", 5)
-            self.status(f"Loading speech model '{model}' on {device} ({ctype}, beam={beam})…")
-            # two instances so both channels transcribe truly in parallel
-            self.stt_int = LocalSTT(model=model, language=lang, device=device, compute_type=ctype, beam_size=beam)
-            self.stt_me = LocalSTT(model=model, language=lang, device=device, compute_type=ctype, beam_size=beam)
+            # one backend per channel so both channels transcribe in parallel
+            self.stt_int = make_stt(stt_cfg, self.status)
+            self.stt_me = make_stt(stt_cfg)
             self.stt = self.stt_me     # back-compat alias
             self._stt_error = None
-            if device == "cuda" and self.stt_int.device != "cuda":
-                self.status(f"GPU unavailable — using CPU (slow for {model}). {self.stt_int.fallback_reason}", "error")
-            threading.Thread(target=self._seg_worker, args=("interviewer", self._q_int, self.stt_int),
-                             daemon=True, name="stt-interviewer").start()
-            threading.Thread(target=self._seg_worker, args=("candidate", self._q_me, self.stt_me),
-                             daemon=True, name="stt-candidate").start()
-            mode = "Auto-answer on." if self.auto_silence else "Press the hotkey to ask."
-            self.status(f"Listening — Whisper {model} on {self.stt_int.device.upper()}. {mode}")
         except Exception as e:
             self.stt = self.stt_int = self.stt_me = None
             self._stt_error = str(e)
-            self.status(f"Local speech model failed to load: {e}", "error")
+            self.status(f"Speech engine unavailable: {e}", "error")
+            return
+        if stt_cfg.get("device", "cuda") == "cuda" and getattr(self.stt_int, "device", "") == "cpu":
+            self.status(f"GPU unavailable — using CPU (slow for {stt_cfg.get('model', 'large-v3')}). "
+                        f"{self.stt_int.fallback_reason}", "error")
+        self._start_seg_workers()
+        mode = "Auto-answer on." if self.auto_silence else "Press the hotkey to ask."
+        self.status(f"Listening — {self._stt_label()}. {mode}")
+
+    def _start_seg_workers(self):
+        if getattr(self, "_workers_up", False):
+            return
+        self._workers_up = True
+        threading.Thread(target=self._seg_worker, args=("interviewer", self._q_int),
+                         daemon=True, name="stt-interviewer").start()
+        threading.Thread(target=self._seg_worker, args=("candidate", self._q_me),
+                         daemon=True, name="stt-candidate").start()
 
     def _init_audio(self):
         try:
@@ -251,19 +269,57 @@ class Copilot:
         if self._seg_len(buf) >= MIN_SAMPLES:
             q.put(np.concatenate(buf))
 
-    def _seg_worker(self, channel: str, q: queue.Queue, stt):
-        """One per channel — transcribes completed segments in parallel."""
+    def _seg_worker(self, channel: str, q: queue.Queue):
+        """One per channel — transcribes completed segments in parallel. The
+        backend is looked up per segment so a settings change or a VoxType
+        failover swaps engines without restarting the thread."""
         while True:
             audio = q.get()
             if audio is None:
                 return
+            stt = self.stt_int if channel == "interviewer" else self.stt_me
+            if stt is None:              # engine reloading / failed to build
+                continue
             try:
                 text = stt.transcribe(audio)
             except Exception as e:
                 self.status(f"Transcription failed — {e}", "error")
+                self._maybe_failover(stt)
                 continue
             if _meaningful(text):        # drop blank / filler / silence hallucinations
                 self._on_segment(channel, text)
+
+    def _maybe_failover(self, stt):
+        """engine=auto and VoxType vanished mid-interview (app closed, engine
+        crash) → load the built-in model once, in the background, instead of
+        losing transcription for the rest of the session."""
+        cfg = CFG.get("stt", {}) or {}
+        if getattr(stt, "device", "") != "voxtype" or self._failing_over:
+            return
+        if (cfg.get("engine") or "auto").strip().lower() != "auto":
+            return
+        if voxtype_probe(cfg.get("voxtype_url") or "")[0]:
+            return                       # still up — that was a one-off error
+        self._failing_over = True
+        self.status("VoxType is gone — switching to the built-in speech model…", "error")
+        threading.Thread(target=self._swap_to_local, args=(cfg,), daemon=True,
+                         name="stt-failover").start()
+
+    def _swap_to_local(self, cfg: dict):
+        local = dict(cfg, engine="local")
+        try:
+            self.stt_int = make_stt(local, self.status)
+            self.stt_me = self.stt = make_stt(local)
+            self._stt_error = None
+            # we're now running something other than what `stt` asks for, so let
+            # the next Save & Apply re-select (picks VoxType up again if it's back)
+            self._stt_cfg_key = None
+            self.status(f"Listening — {self._stt_label()}.")
+        except Exception as e:
+            self._stt_error = str(e)
+            self.status(f"Built-in speech model failed to load: {e}", "error")
+        finally:
+            self._failing_over = False
 
     def _on_segment(self, channel: str, text: str):
         if channel == "interviewer":
@@ -395,7 +451,11 @@ class Copilot:
         self.auto_silence = bool(a.get("auto_silence", False))
         self.silence_seconds = float(a.get("silence_seconds", 1.2))
         self.speech_threshold = float(a.get("speech_threshold", 0.02))
-        # STT is fixed local Whisper — no rebuild needed on settings change.
+        # rebuild STT only if its config changed, or if it's currently down /
+        # failed over (a local model load is slow, so never do it speculatively)
+        # — off-thread, the segment workers stay up
+        if self.stt_int is None or self._stt_key() != self._stt_cfg_key:
+            threading.Thread(target=self._init_stt, daemon=True, name="stt-rebuild").start()
         self.status("Settings applied.")
         self.post({"type": "settings_applied"})
 

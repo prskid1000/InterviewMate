@@ -27,12 +27,20 @@ from .uikit import apply_capture_exclusion, load_state, save_state
 CONTEXT_DIR = ROOT / "context"
 
 SECTIONS = [("model", "🧠   AI Model"), ("interview", "💬   Interview"),
-            ("behavior", "🎛   Overlay & Audio"), ("about", "⌨   Hotkeys")]
+            ("speech", "🎙   Speech"), ("behavior", "🎛   Overlay & Audio"),
+            ("about", "⌨   Hotkeys")]
+
+STT_ENGINES = [("auto", "Auto (recommended)"), ("voxtype", "VoxType API only"),
+               ("local", "Built-in model only")]
 
 # Presets only PREFILL a new provider row — they are not a fixed chain.
 # Presets list only FREE-tier providers. Paid ones (OpenAI, Anthropic, …) are
 # added via "Custom…" — pick the api type and paste the base URL + model + key.
 LLM_PRESETS = {
+    # local first: telecode's dual-protocol proxy in front of llama.cpp. Costs
+    # nothing, no quota, and the chain skips it in ~0.4 s when it isn't running,
+    # so it's safe to leave at the top with a cloud provider underneath.
+    "Telecode local (llama.cpp)": ("anthropic", "http://127.0.0.1:1235", "qwen3.6-35b"),
     "Gemini (free)": ("openai", "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.5-flash-lite"),
     "Groq (free)": ("openai", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
     "OpenRouter (free)": ("openai", "https://openrouter.ai/api/v1", "meta-llama/llama-3.3-70b-instruct:free"),
@@ -406,7 +414,7 @@ class SettingsWindow(QWidget):
             self._sidebar.addItem(it)
         self._sidebar.currentRowChanged.connect(lambda i: self._stack.setCurrentIndex(i))
         self._stack = QStackedWidget()
-        for builder in (self._page_model, self._page_interview,
+        for builder in (self._page_model, self._page_interview, self._page_speech,
                         self._page_behavior, self._page_about):
             self._stack.addWidget(builder())
         bl.addWidget(self._sidebar); bl.addWidget(self._stack, 1)
@@ -561,6 +569,52 @@ class SettingsWindow(QWidget):
         self._refill_profile_combo(nxt)
         self._load_profile_into_widgets(nxt)
 
+    def _page_speech(self):
+        scroll, lay = _page()
+        lay.addWidget(_title("Speech-to-text",
+                             "Transcription runs offline either way. VoxType already keeps Whisper "
+                             "loaded on the GPU, so borrowing its API costs no extra VRAM and no "
+                             "model-load wait — worth preferring when VoxType is running."))
+
+        ec, eb = _card("Engine")
+        self.stt_engine = QComboBox()
+        for val, label in STT_ENGINES:
+            self.stt_engine.addItem(label, val)
+        eb.addWidget(_row("Engine", self.stt_engine,
+                          "Auto uses VoxType when it's running and loads the built-in model when it "
+                          "isn't — including a mid-session switch if VoxType goes away."))
+        urlrow = QWidget(); uh = QHBoxLayout(urlrow); uh.setContentsMargins(0, 0, 0, 0); uh.setSpacing(8)
+        self.stt_vox_url = QLineEdit(); self.stt_vox_url.setPlaceholderText("http://127.0.0.1:6600")
+        test = QPushButton("Test"); test.setCursor(Qt.CursorShape.PointingHandCursor)
+        test.clicked.connect(self._test_voxtype)
+        uh.addWidget(self.stt_vox_url, 1); uh.addWidget(test)
+        eb.addWidget(_row("VoxType URL", urlrow,
+                          "VoxType → Settings → OpenAI HTTP Server must be enabled (default port 6600)."))
+        self.stt_vox_status = QLabel(""); self.stt_vox_status.setProperty("class", "row_help")
+        self.stt_vox_status.setWordWrap(True)
+        eb.addWidget(self.stt_vox_status)
+        lay.addWidget(ec)
+
+        mc, mb = _card("Built-in model", "used when the engine is Local, or as the Auto fallback")
+        self.stt_model = QLineEdit(); self.stt_model.setPlaceholderText("large-v3")
+        mb.addWidget(_row("Whisper model", self.stt_model,
+                          "large-v3 on an NVIDIA GPU. CPU-only machines should use small.en."))
+        self.stt_device = QComboBox(); self.stt_device.addItem("GPU (CUDA)", "cuda"); self.stt_device.addItem("CPU", "cpu")
+        mb.addWidget(_row("Device", self.stt_device, "GPU falls back to CPU automatically if CUDA is unavailable."))
+        self.stt_beam = QSpinBox(); self.stt_beam.setRange(1, 10)
+        mb.addWidget(_row("Beam size", self.stt_beam, "Higher = slightly better accuracy, slower."))
+        self.stt_lang = QLineEdit(); self.stt_lang.setPlaceholderText("en")
+        mb.addWidget(_row("Language", self.stt_lang, "ISO code sent to both engines. Blank = auto-detect."))
+        lay.addWidget(mc); lay.addStretch(1)
+        return scroll
+
+    def _test_voxtype(self):
+        from .stt import voxtype_probe
+        url = self.stt_vox_url.text().strip() or "http://127.0.0.1:6600"
+        ok, detail = voxtype_probe(url)
+        self.stt_vox_status.setText(("✓ Reachable — " if ok else "✗ Not reachable — ") + detail)
+        self.stt_vox_status.setStyleSheet(f"color:{'#56e0c2' if ok else '#ff8080'};font-size:11.5px;")
+
     def _page_behavior(self):
         scroll, lay = _page()
         lay.addWidget(_title("Overlay & Audio",
@@ -660,6 +714,16 @@ class SettingsWindow(QWidget):
         self.disable_thinking.setChecked(bool(llm.get("disable_thinking", True)))
         self.thinking_tokens.setValue(int(llm.get("thinking_tokens", 0)))
 
+        st = CFG.get("stt", {}) or {}
+        eng = (st.get("engine") or "auto").strip().lower()
+        self.stt_engine.setCurrentIndex(max(0, self.stt_engine.findData(eng)))
+        self.stt_vox_url.setText(st.get("voxtype_url") or "http://127.0.0.1:6600")
+        self.stt_vox_status.setText("")
+        self.stt_model.setText(st.get("model") or "large-v3")
+        self.stt_device.setCurrentIndex(max(0, self.stt_device.findData(st.get("device") or "cuda")))
+        self.stt_beam.setValue(int(st.get("beam_size", 5)))
+        self.stt_lang.setText(st.get("language") or "")
+
         ov = CFG.get("overlay", {}) or {}
         self.opacity.setValue(float(ov.get("opacity", 1.0)))
         self.hide_capture.setChecked(bool(ov.get("exclude_from_capture", True)))
@@ -727,6 +791,18 @@ class SettingsWindow(QWidget):
         cfg["overlay"] = {**(CFG.get("overlay", {}) or {}),
                           "opacity": round(self.opacity.value(), 2),
                           "exclude_from_capture": self.hide_capture.isChecked()}
+        st_old = CFG.get("stt", {}) or {}
+        dev = self.stt_device.currentData() or "cuda"
+        # keep a hand-tuned compute_type only while the device is unchanged
+        ctype = st_old.get("compute_type") if dev == (st_old.get("device") or "cuda") else None
+        cfg["stt"] = {**st_old,
+                      "engine": self.stt_engine.currentData() or "auto",
+                      "voxtype_url": self.stt_vox_url.text().strip() or "http://127.0.0.1:6600",
+                      "language": self.stt_lang.text().strip(),
+                      "model": self.stt_model.text().strip() or "large-v3",
+                      "device": dev,
+                      "compute_type": ctype or ("float16" if dev == "cuda" else "int8"),
+                      "beam_size": self.stt_beam.value()}
         cfg["audio"] = {**(CFG.get("audio", {}) or {}),
                         "auto_silence": self.auto_silence.isChecked(),
                         "silence_seconds": round(self.silence_secs.value(), 1),

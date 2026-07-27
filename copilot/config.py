@@ -14,13 +14,19 @@ CONFIG_PATH = ROOT / "config.yaml"
 # Written on first run if config.yaml is missing, so a fresh clone works with no
 # setup and config.yaml can stay gitignored (keys never get committed).
 DEFAULT_CONFIG = {
-    # transcription is local Whisper — no key. GPU mode: large-v3 on CUDA
-    # (float16) = large-v3 accuracy AND ~13x realtime (needs an NVIDIA GPU +
-    # nvidia-cublas-cu12 / nvidia-cudnn-cu12). Falls back to CPU int8 if CUDA is
-    # unavailable (functional but slow for large-v3 — set model=small.en for
-    # CPU-only machines). (Audio preprocessing was tried and reverted — it hurt
-    # accuracy; Whisper prefers the raw signal.)
-    "stt": {"language": "en", "model": "large-v3", "device": "cuda",
+    # transcription is offline either way — no key.
+    #   engine: auto    → use VoxType's embedded speech API if it's running
+    #                     (its Whisper is already on the GPU, so we skip loading
+    #                     a second copy), else load our own model below
+    #           voxtype → VoxType only; error if it isn't reachable
+    #           local   → always load our own model
+    # local mode: large-v3 on CUDA (float16) = large-v3 accuracy AND ~13x
+    # realtime (needs an NVIDIA GPU + nvidia-cublas-cu12 / nvidia-cudnn-cu12).
+    # Falls back to CPU int8 if CUDA is unavailable (functional but slow for
+    # large-v3 — set model=small.en for CPU-only machines). (Audio preprocessing
+    # was tried and reverted — it hurt accuracy; Whisper prefers the raw signal.)
+    "stt": {"engine": "auto", "voxtype_url": "http://127.0.0.1:6600",
+            "language": "en", "model": "large-v3", "device": "cuda",
             "compute_type": "float16", "beam_size": 5},
     "overlay": {"enabled": True, "exclude_from_capture": True, "opacity": 1.0},
     "hotkeys": {

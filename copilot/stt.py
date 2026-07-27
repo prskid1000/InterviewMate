@@ -1,16 +1,17 @@
-"""User-defined speech-to-text provider chain — no hardcoded providers.
+"""Speech-to-text backends.
 
-Each STT provider in config is custom:
-  {name, api_type: local|openai|gemini, base_url, api_key (or api_key_env),
-   model, enabled}
+Two engines matter in practice (picked by `stt.engine` in config.yaml):
 
-  local  — faster-whisper, offline & unlimited (model = tiny|base|small|…)
-  openai — any OpenAI-compatible /audio/transcriptions endpoint (Groq, OpenAI,
-           self-hosted whisper) — base_url + key + model
-  gemini — Gemini generateContent with inline audio — base_url + key + model
+  voxtype — VoxType's embedded OpenAI-compatible server (default :6600). Its
+            Whisper is already resident on the GPU, so we reuse it instead of
+            loading a second copy of large-v3 into VRAM.
+  local   — our own faster-whisper (large-v3 on CUDA float16, CPU int8 fallback).
 
-Providers are tried top-first; the first that returns text wins. Heavy local
-models are built lazily on first use.
+`engine: auto` (the default) probes VoxType and only spins up the local GPU
+model when VoxType isn't there. See `make_stt`.
+
+The user-defined cloud provider chain below (openai / gemini api types) is kept
+for reference and is not offered in the UI.
 """
 import base64
 import io
@@ -112,6 +113,60 @@ class LocalSTT:
                 audio, language=self.language, beam_size=self.beam_size,
                 vad_filter=True)
             return " ".join(s.text.strip() for s in segments).strip()
+
+
+VOXTYPE_URL = "http://127.0.0.1:6600"
+
+
+def voxtype_probe(base_url: str = VOXTYPE_URL, timeout: float = 1.5) -> tuple[bool, str]:
+    """Is VoxType's embedded STT server up? Cheap GET /health — a few ms on
+    localhost, so it's safe to call on every STT (re)build. Returns
+    (available, detail); detail is the failure reason, or the engine's
+    readiness when it is available."""
+    import httpx
+    try:
+        r = httpx.get(f"{(base_url or VOXTYPE_URL).rstrip('/')}/health", timeout=timeout)
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)[:120]}"
+    if r.status_code != 200:
+        return False, f"HTTP {r.status_code}"
+    try:
+        st = (r.json().get("stt") or {})
+    except Exception:
+        return False, "unexpected /health payload"
+    if st.get("error"):
+        return False, str(st["error"])[:200]
+    return True, "model resident" if st.get("ready") else "loads on first use"
+
+
+class VoxTypeSTT:
+    """VoxType's embedded OpenAI-compatible STT server (default :6600).
+
+    Nothing is loaded here — VoxType already holds Whisper on the GPU, so this
+    costs no extra VRAM and no model-load wait at startup. Concurrent requests
+    serialize inside VoxType's engine worker; localhost HTTP framing is a few ms
+    against a multi-second utterance, so the two channels still keep up."""
+
+    def __init__(self, base_url=VOXTYPE_URL, language="en", timeout=180.0):
+        import httpx
+        self.base = (base_url or VOXTYPE_URL).rstrip("/")
+        self.language = language or None
+        self.device = "voxtype"
+        self.fallback_reason = None
+        self.http = httpx.Client(timeout=timeout)
+
+    def transcribe(self, audio: np.ndarray) -> str:
+        data = {"response_format": "text"}
+        if self.language:
+            data["language"] = self.language
+        r = self.http.post(
+            f"{self.base}/v1/audio/transcriptions",
+            files={"file": ("utterance.wav", _wav_bytes(audio), "audio/wav")},
+            data=data,
+        )
+        if r.status_code != 200:
+            raise RuntimeError(f"VoxType HTTP {r.status_code} — {r.text.strip()[:200]}")
+        return r.text.strip()
 
 
 class OpenAISTT:
@@ -223,11 +278,32 @@ class SttChain:
         raise RuntimeError("All STT providers failed — " + "; ".join(errors))
 
 
-def make_stt(cfg: dict):
-    """STT is local Whisper (large-v3 on GPU, CPU fallback) — offline, no API
-    key. The cloud STT classes above are kept for reference but unused."""
+def make_stt(cfg: dict, on_status=None):
+    """Build one channel's STT backend from the `stt` config block.
+
+    `engine`: auto (default — VoxType if it's up, else our own GPU model) |
+    voxtype (fail loudly if it isn't up) | local (never touch VoxType).
+    Offline either way — no API key. `on_status(text)` gets a one-line note
+    about which engine won, for the HUD."""
     cfg = cfg or {}
-    return LocalSTT(model=cfg.get("model", "large-v3"), language=cfg.get("language", "en"),
-                    device=cfg.get("device", "cuda"),
-                    compute_type=cfg.get("compute_type"),
-                    beam_size=cfg.get("beam_size", 5))
+    engine = (cfg.get("engine") or "auto").strip().lower()
+    url = cfg.get("voxtype_url") or VOXTYPE_URL
+    lang = cfg.get("language", "en")
+    say = on_status if callable(on_status) else (lambda *_: None)
+
+    if engine in ("auto", "voxtype"):
+        ok, detail = voxtype_probe(url)
+        if ok:
+            say(f"Using VoxType speech API at {url} — {detail}.")
+            return VoxTypeSTT(url, language=lang)
+        if engine == "voxtype":
+            raise RuntimeError(f"VoxType speech API not reachable at {url} — {detail}")
+        say(f"VoxType not running ({detail}) — loading the built-in GPU model instead.")
+
+    model = cfg.get("model", "large-v3")
+    device = cfg.get("device", "cuda")
+    ctype = cfg.get("compute_type") or ("float16" if device == "cuda" else "int8")
+    beam = cfg.get("beam_size", 5)
+    say(f"Loading built-in speech model '{model}' on {device} ({ctype}, beam={beam})…")
+    return LocalSTT(model=model, language=lang, device=device,
+                    compute_type=ctype, beam_size=beam)
