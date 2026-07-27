@@ -4,8 +4,9 @@ A single frameless, capture-hidden window that stacks:
   • the top BAR — status glyph + both live level meters (INTERVIEWER / YOU)
   • the answer area — streams the AI answer as one continuous session
 
-Drag the bar to move; click the left status zone to record; right-click for
-the menu; resize from any edge/corner. The answer area can be collapsed
+Drag the bar to move; click the left status zone to record; click the gear at
+the right of the bar for settings; right-click for the menu; resize from any
+edge/corner. The answer area can be collapsed
 (toggle_answer hotkey). Position, size, visibility and collapsed state all
 persist across restarts.
 """
@@ -16,7 +17,7 @@ import math
 import re
 import webbrowser
 
-from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QLinearGradient, QMouseEvent, QPainter, QPainterPath, QPen,
 )
@@ -330,6 +331,7 @@ class Hud(ResizableMixin, QWidget):
     MIN_W = 280
     BAR_H = 58                 # height of the status/meter strip at the top
     DEFAULT_H = 320            # expanded height when no state is saved
+    GEAR_W = 32                # settings hit zone at the right end of the BAR
 
     def __init__(self, co, config_url: str):
         super().__init__()
@@ -348,6 +350,7 @@ class Hud(ResizableMixin, QWidget):
         self._moved = False
         self._int_disp = 0.0
         self._me_disp = 0.0
+        self._gear_hover = False
         self._answer_expanded = bool(st.get("answer_expanded", True))
 
         # tabs + answer area live below the bar; the layout reserves the strip
@@ -544,17 +547,32 @@ class Hud(ResizableMixin, QWidget):
             if (new - self.frameGeometry().topLeft()).manhattanLength() > 3:
                 self._moved = True
             self.move(new)
+            return
+        # gear hover — rz_move already reset the cursor to Arrow, so re-set it
+        hot = self._gear_rect().contains(e.position())
+        if hot:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        if hot != self._gear_hover:
+            self._gear_hover = hot
+            self.update()
+
+    def leaveEvent(self, e):
+        super().leaveEvent(e)
+        if self._gear_hover:
+            self._gear_hover = False
+            self.update()
 
     def mouseReleaseEvent(self, e: QMouseEvent):
         if self.rz_release():
             return
         if self._drag is not None:
             save_state(hud_x=self.x(), hud_y=self.y())
-            # click (no drag) on the left status zone of the BAR = record toggle
-            if not self._moved and e.button() == Qt.MouseButton.LeftButton \
-                    and getattr(self, "_press_x", 99) < 52 \
-                    and getattr(self, "_press_y", 99) < self.BAR_H:
-                self._toggle_recording()
+            px, py = getattr(self, "_press_x", 99), getattr(self, "_press_y", 99)
+            if not self._moved and e.button() == Qt.MouseButton.LeftButton:
+                if self._gear_rect().contains(QPointF(px, py)):
+                    self._open_settings()        # gear at the right of the BAR
+                elif px < 52 and py < self.BAR_H:
+                    self._toggle_recording()     # left status zone = ask now
         self._drag = None
 
     def contextMenuEvent(self, e):
@@ -571,7 +589,7 @@ class Hud(ResizableMixin, QWidget):
         ans.triggered.connect(self._toggle_answer)
         menu.addSeparator()
         cfg = menu.addAction("Settings…")
-        cfg.triggered.connect(lambda: self.settings.toggle() if self.settings else webbrowser.open(self.config_url))
+        cfg.triggered.connect(self._open_settings)
         clr = menu.addAction("Clear session")
         clr.triggered.connect(self.co.clear)
         rp = menu.addAction("Reset position")
@@ -585,6 +603,14 @@ class Hud(ResizableMixin, QWidget):
         # continuous listening never stops — the hotkey/click just sends the
         # current turn (interviewer question + my response) to the LLM.
         self.co.ask_now()
+
+    def _open_settings(self):
+        """Gear click, context menu, and the open_config hotkey all land here.
+        Falls back to the browser UI if the native window wasn't built."""
+        if self.settings is not None:
+            self.settings.toggle()
+        else:
+            webbrowser.open(self.config_url)
 
     # painting ----------------------------------------------------------
 
@@ -606,15 +632,45 @@ class Hud(ResizableMixin, QWidget):
 
         lx = 62
         bx = lx + 78
-        bw = W - bx - 14
+        bw = W - bx - 14 - self.GEAR_W        # keep the meters clear of the gear
         self._meter(p, lx, bx, bw, B * 0.32, "INTERVIEWER", self._int_disp, INT_COLOR)
         self._meter(p, lx, bx, bw, B * 0.68, "YOU", self._me_disp, ME_COLOR)
+        self._draw_gear(p, self._gear_rect())
 
         # divider between the bar and the answer area (only when expanded)
         if self._answer_expanded and H > B + 2:
             p.setPen(QPen(QColor(255, 255, 255, 16), 1.0))
             p.drawLine(12, B, W - 12, B)
         p.end()
+
+    # ── settings gear ──
+
+    def _gear_rect(self) -> QRectF:
+        """Click zone at the right end of the BAR (full bar height so it's easy
+        to hit on a small overlay)."""
+        return QRectF(self.width() - self.GEAR_W - 8, 0.0, self.GEAR_W, float(self.BAR_H))
+
+    def _draw_gear(self, p, r: QRectF):
+        hot = self._gear_hover
+        cx, cy = r.center().x(), r.center().y()
+        if hot:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(QColor(107, 164, 255, 32)))
+            p.drawRoundedRect(QRectF(cx - 13, cy - 13, 26, 26), 8, 8)
+        col = QColor(107, 164, 255) if hot else QColor(132, 148, 172)
+        p.save()
+        p.translate(cx, cy)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(col))
+        for i in range(8):                       # teeth
+            p.save()
+            p.rotate(i * 45.0)
+            p.drawRoundedRect(QRectF(-1.6, -9.0, 3.2, 3.9), 1.1, 1.1)
+            p.restore()
+        p.setBrush(Qt.BrushStyle.NoBrush)        # ring (leaves the hub hollow)
+        p.setPen(QPen(col, 2.5))
+        p.drawEllipse(QRectF(-5.4, -5.4, 10.8, 10.8))
+        p.restore()
 
     def _meter(self, p, lx, bx, bw, cy, label, lvl, color):
         # channel label

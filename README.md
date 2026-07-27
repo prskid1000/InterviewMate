@@ -76,7 +76,8 @@ run.bat
 ```
 
 The overlay appears at the bottom-center of your screen. There is **no tray
-icon** — the HUD's right-click menu and the global hotkeys are the controls.
+icon** — the controls are the **⚙ gear at the right of the HUD bar** (opens
+settings), the HUD's right-click menu, and the global hotkeys.
 
 ---
 
