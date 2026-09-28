@@ -4,10 +4,10 @@
     Uninstall InterviewMate — stops the app, removes the scheduled task, and
     optionally removes the venv and local data (config, state).
 .PARAMETER InstallDir
-    Repo / install root. Defaults to ~/.interview.
+    Repo / install root. Defaults to the folder this script lives in.
 #>
 param(
-    [string]$InstallDir = "$env:USERPROFILE\.interview"
+    [string]$InstallDir = $PSScriptRoot
 )
 
 function Ok($msg)   { Write-Host "  [OK] $msg"   -ForegroundColor Green }

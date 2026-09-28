@@ -16,7 +16,7 @@
     Only the AI answer needs a provider key (Gemini / Groq), which you add in
     the app's Settings -> AI Model, or in .env (GEMINI_API_KEY=...).
 .PARAMETER InstallDir
-    Repo / install root. Defaults to ~/.interview. Must contain copilot/.
+    Repo / install root. Defaults to the folder this script lives in. Must contain copilot/.
 .PARAMETER PreloadModel
     Download the Whisper large-v3 model now (~2.9 GB) instead of lazily on the
     first transcription. Default $true.
@@ -24,7 +24,7 @@
     Register + start the `InterviewMate` logon task. Default $true.
 #>
 param(
-    [string]$InstallDir   = "$env:USERPROFILE\.interview",
+    [string]$InstallDir   = $PSScriptRoot,
     [bool]  $PreloadModel = $true,
     [bool]  $RegisterTask = $true
 )
@@ -63,6 +63,8 @@ if (Test-Path $pyenvRoot) {
     }
 }
 foreach ($p in @(
+    "$env:LOCALAPPDATA\Programs\Python\Python314\python.exe",
+    "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe",
     "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
     "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
     "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe"
