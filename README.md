@@ -83,7 +83,7 @@ run.bat
 
 The overlay appears at the bottom-center of your screen. There is **no tray
 icon** — the controls are the icons at the right of the HUD bar (● Listen,
-✦ Answer, ⚙ settings) and the right-click menu (also Quit).
+📷 Screen, ✦ Answer, ⚙ settings) and the right-click menu (also Quit).
 
 ---
 
@@ -93,6 +93,7 @@ icon** — the controls are the icons at the right of the HUD bar (● Listen,
 |----------------|--------|
 | **●** Listen / **■** Stop | Open / close the mic and system-audio capture |
 | **✦** Answer | Send everything said since the last answer (interviewer + you, in order) and stream what to say — if you'd started answering, it continues / improves your attempt |
+| **📷** Screen | Same as Answer, plus a screenshot of the screen under your mouse attached — for a coding problem, diagram or chat message the interviewer is showing. The HUD itself isn't in the shot. Needs a model that reads images (Telecode's Qwen3.6 does) |
 | **✕** (while answering) | Cancel the answer |
 | **⚙** | Settings |
 

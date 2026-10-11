@@ -4,9 +4,9 @@ A single frameless, capture-hidden window that stacks:
   • the top BAR — status glyph + both live level meters (INTERVIEWER / YOU)
   • the answer area — streams the AI answer as one continuous session
 
-Drag the bar to move; three painted icon buttons at its right end drive it:
-Listen (● → ■ stop), Answer (✦ → ✕ cancel while answering) and the settings
-gear; right-click for the menu; resize from any edge/corner. The only hotkey
+Drag the bar to move; painted icon buttons at its right end drive it:
+Listen (● → ■ stop), Screen (📷 answer with a screenshot attached), Answer
+(✦ → ✕ cancel while answering) and the settings gear; right-click for the menu; resize from any edge/corner. The only hotkey
 shows / hides the whole overlay. Position, size, visibility and
 collapsed state all persist across restarts.
 """
@@ -332,8 +332,8 @@ class Hud(ResizableMixin, QWidget):
     BAR_H = 58                 # height of the status/meter strip at the top
     DEFAULT_H = 320            # expanded height when no state is saved
     GEAR_W = 32                # width of each icon hit zone at the right end of the BAR
-    # icon buttons, right to left: settings, answer, listen
-    _ICONS = ("gear", "answer", "listen")
+    # icon buttons, right to left: settings, answer, screenshot, listen
+    _ICONS = ("gear", "answer", "shot", "listen")
 
     def __init__(self, co, config_url: str):
         super().__init__()
@@ -591,6 +591,8 @@ class Hud(ResizableMixin, QWidget):
                     self.co.toggle_listening()
                 elif icon == "answer":
                     self.co.cancel() if self._answering else self.co.ask_now()
+                elif icon == "shot":
+                    self.co.screenshot_answer()
         self._drag = None
 
     def contextMenuEvent(self, e):
@@ -604,6 +606,7 @@ class Hud(ResizableMixin, QWidget):
         lis = menu.addAction("Stop listening" if self._listening else "Listen")
         lis.triggered.connect(self.co.toggle_listening)
         menu.addAction("Answer").triggered.connect(self.co.ask_now)
+        menu.addAction("Answer with a screenshot").triggered.connect(self.co.screenshot_answer)
         ans = menu.addAction("Collapse answer" if self._answer_expanded else "Expand answer")
         ans.triggered.connect(self._toggle_answer)
         menu.addSeparator()
@@ -650,6 +653,7 @@ class Hud(ResizableMixin, QWidget):
         self._meter(p, lx, bx, bw, B * 0.32, "INTERVIEWER", self._int_disp, INT_COLOR)
         self._meter(p, lx, bx, bw, B * 0.68, "YOU", self._me_disp, ME_COLOR)
         self._draw_listen(p, self._icon_rect("listen"))
+        self._draw_shot(p, self._icon_rect("shot"))
         self._draw_answer(p, self._icon_rect("answer"))
         self._draw_gear(p, self._icon_rect("gear"))
 
@@ -681,6 +685,8 @@ class Hud(ResizableMixin, QWidget):
                 return "Cancel the answer"
             return ("Answer — waiting for the last bit of audio to transcribe" if self._pending
                     else "Answer — send everything since the last answer")
+        if name == "shot":
+            return "Answer with a screenshot of this screen attached"
         return "Settings"
 
     def _icon_bg(self, p, cx, cy, name, tint=QColor(107, 164, 255)):
@@ -712,6 +718,20 @@ class Hud(ResizableMixin, QWidget):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QBrush(col))
             p.drawEllipse(QRectF(cx - 4, cy - 4, 8, 8))
+
+    def _draw_shot(self, p, r: QRectF):
+        """📷 camera: answer with a screenshot attached."""
+        cx, cy = r.center().x(), r.center().y()
+        blue = QColor(107, 164, 255)
+        self._icon_bg(p, cx, cy, "shot", blue)
+        col = blue if self._hover == "shot" else QColor(132, 160, 205)
+        p.setPen(QPen(col, 1.8))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(QRectF(cx - 8, cy - 4.5, 16, 11), 2.5, 2.5)     # body
+        p.drawEllipse(QRectF(cx - 3.2, cy - 2.2, 6.4, 6.4))                # lens
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(col))
+        p.drawRoundedRect(QRectF(cx - 3.5, cy - 7, 7, 3), 1.2, 1.2)        # viewfinder bump
 
     def _draw_answer(self, p, r: QRectF):
         """✦ sparkle = answer now; ✕ while an answer streams = cancel. An amber

@@ -10,6 +10,9 @@ Manual flow (buttons on the HUD / browser UI):
             spoken ("Interviewer: … / Me: …") and sent; the answer streams back
             (it continues / improves my attempt if I'd started answering).
             Listening carries on — the next turn starts at that moment.
+  Screen    (📷) same as Answer, plus a screenshot of the screen under the mouse
+            (a coding problem, a diagram, the meeting chat) attached for the
+            LLM to read. The HUD is capture-excluded, so it isn't in the shot.
   Cancel    aborts the answer (closes the provider's HTTP stream).
   ■ Stop    closes both devices; audio already captured still belongs to the
             open turn, so Answer after Stop works.
@@ -22,6 +25,8 @@ loopback is loud (`audio.echo_gate`) and "me" lines that repeat the
 interviewer are dropped.
 """
 import asyncio
+import base64
+import ctypes
 import difflib
 import json
 import queue
@@ -46,6 +51,7 @@ CUT_WINDOW_SEC = 4.0        # cut a background chunk at the quietest frame in it
 GATE_HOLD_SEC = 0.3         # echo gate: mic stays muted this long after the loopback quiets
 TRIM_PAD_SEC = 0.25         # silence kept around speech when trimming a chunk
 KEEPALIVE_SEC = 120         # < telecode's 150 s idle unload, so a local model stays warm
+SHOT_MAX_W = 1920           # screenshots wider than this are downscaled (integer factor)
 
 # Whisper hallucinates these on near-silence; ignore segments that are only these.
 _FILLER = {"you", "and", "the", "uh", "um", "umm", "hmm", "mm", "so", "okay", "ok",
@@ -81,6 +87,30 @@ def _is_echo(me: str, interviewer_texts) -> bool:
         if covered / len(mw) >= 0.6:
             return True
     return False
+
+
+def _grab_screen_png() -> bytes:
+    """PNG of the monitor under the mouse cursor (physical pixels, so mixed-DPI
+    setups pick the right screen), downscaled by an integer factor to at most
+    SHOT_MAX_W wide. Windows marked exclude-from-capture (our HUD) aren't in it."""
+    import mss
+    import mss.tools
+
+    class _PT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+    pt = _PT()
+    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+    with mss.mss() as sct:
+        mons = sct.monitors[1:] or sct.monitors
+        mon = next((m for m in mons if m["left"] <= pt.x < m["left"] + m["width"]
+                    and m["top"] <= pt.y < m["top"] + m["height"]), mons[0])
+        shot = sct.grab(mon)
+    rgb = np.frombuffer(shot.rgb, np.uint8).reshape(shot.height, shot.width, 3)
+    f = -(-shot.width // SHOT_MAX_W)
+    if f > 1:
+        h, w = shot.height // f, shot.width // f
+        rgb = rgb[:h * f, :w * f].reshape(h, f, w, f, 3).mean(axis=(1, 3)).astype(np.uint8)
+    return mss.tools.to_png(np.ascontiguousarray(rgb).tobytes(), (rgb.shape[1], rgb.shape[0]))
 
 
 def _rms_frames(audio: np.ndarray, frame: int = 480) -> np.ndarray:
@@ -441,16 +471,27 @@ class Copilot:
     def ask_now(self):
         self.close_turn("answer")
 
-    def close_turn(self, mode: str):
+    def screenshot_answer(self):
+        """📷: grab the screen (off the UI thread), then Answer with it attached."""
+        def run():
+            try:
+                png = _grab_screen_png()
+            except Exception as e:
+                self.status(f"Screenshot failed: {e}", "error")
+                return
+            self.close_turn("answer", image=png)
+        threading.Thread(target=run, daemon=True, name="screenshot").start()
+
+    def close_turn(self, mode: str, image: bytes | None = None):
         """Answer: cut both channels and close the open turn; the manager sends
-        it once every chunk of it is transcribed."""
+        it once every chunk of it is transcribed (with `image` attached)."""
         with self._cap_lock:
             for ch in self._cap:
                 self._cut(ch, at_quiet=False)
             turn = self._turn
             self._turn += 1
             sub = dict(self._submitted.pop(turn, {"interviewer": 0, "candidate": 0}))
-        self._mq.put(("close", turn, mode, sub))
+        self._mq.put(("close", turn, mode, sub, image))
 
     def cancel(self):
         if self.cancel_event:
@@ -466,8 +507,8 @@ class Copilot:
                 if kind == "text":
                     self._on_text(*ev[1:])
                 elif kind == "close":
-                    _, turn, mode, sub = ev
-                    self._closing[turn] = (mode, sub)
+                    _, turn, mode, sub, image = ev
+                    self._closing[turn] = (mode, sub, image)
                     self._try_finish()
                 elif kind == "say":          # typed in the browser UI
                     _, speaker, text, turn = ev
@@ -506,7 +547,7 @@ class Copilot:
     def _try_finish(self):
         """Send closed turns, oldest first, once all their chunks are back."""
         for turn in sorted(self._closing):
-            mode, sub = self._closing[turn]
+            mode, sub, image = self._closing[turn]
             rec = self._received.get(turn, {"interviewer": 0, "candidate": 0})
             if any(rec.get(ch, 0) < n for ch, n in sub.items()):
                 self.status("Transcribing the last few seconds…")
@@ -517,7 +558,7 @@ class Copilot:
             # a "me" line can arrive before the interviewer line it echoes
             ints = [t for _, sp, t in lines if sp == "interviewer"]
             lines = [ln for ln in lines if ln[1] != "me" or not _is_echo(ln[2], ints)]
-            self._send_turn(mode, lines)
+            self._send_turn(mode, lines, image)
 
     @staticmethod
     def _render_lines(lines) -> str:
@@ -531,15 +572,26 @@ class Copilot:
             last = who
         return "\n".join(out)
 
-    def _send_turn(self, mode: str, lines):
+    def _send_turn(self, mode: str, lines, image: bytes | None = None):
         convo = self._render_lines(lines)
-        if not convo:
+        if not convo and image is None:
             self.status("Nothing captured since the last answer.")
             return
         ask = ("Give me what to say now. If I already started answering, continue and "
                "improve it rather than repeating it.")
-        user = f"Conversation since my last answer:\n{convo}\n\n{ask}"
-        self.answer(user, convo, mode)
+        if image is None:
+            self.answer(f"Conversation since my last answer:\n{convo}\n\n{ask}", convo, mode)
+            return
+        self._add_transcript("me", "📷 Screenshot of my screen")
+        lead = (f"Conversation since my last answer:\n{convo}\n\n" if convo else "")
+        text = (f"{lead}The attached screenshot is my screen right now — the interviewer may "
+                f"be showing a question, code, a diagram or a chat message. Read it and use it. "
+                f"{ask}")
+        user = [{"type": "image", "media_type": "image/png",
+                 "data": base64.b64encode(image).decode("ascii")},
+                {"type": "text", "text": text}]
+        # history keeps text only — re-sending old screenshots every turn is costly
+        self.answer(user, (convo + "\n" if convo else "") + "[screenshot of my screen]", mode)
 
     def _add_transcript(self, speaker: str, text: str):
         if not text:
@@ -550,7 +602,7 @@ class Copilot:
 
     # ---------- answering ----------
 
-    def answer(self, user: str, convo: str, mode: str = "answer"):
+    def answer(self, user, convo: str, mode: str = "answer"):
         if self.cancel_event:
             self.cancel_event.set()
         cancel = self.cancel_event = threading.Event()
@@ -570,7 +622,7 @@ class Copilot:
             temp = None
         return system, temp
 
-    def _answer(self, qid: int, user: str, convo: str, mode: str, cancel: threading.Event):
+    def _answer(self, qid: int, user, convo: str, mode: str, cancel: threading.Event):
         system, temp = self._system_prompt()
         msgs = [{"role": "system", "content": system}]
         n = int(CFG.get("llm", {}).get("history_exchanges", 12))
@@ -701,6 +753,8 @@ async def ws_endpoint(ws: WebSocket):
                 CO.start_listening() if m.get("on", True) else CO.stop_listening()
             elif t == "answer":
                 CO.ask_now()
+            elif t == "screenshot":
+                CO.screenshot_answer()
             elif t == "cancel":
                 CO.cancel()
             elif t in ("ask", "say"):        # typed: interviewer's question / what I said

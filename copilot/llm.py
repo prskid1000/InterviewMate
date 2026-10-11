@@ -53,6 +53,27 @@ def local_endpoint_up(base_url: str, timeout: float = LOCAL_PROBE_S) -> bool:
         return False
 
 
+# Message content is a string, or a list of parts in one provider-neutral shape:
+#   {"type": "text", "text": ...} | {"type": "image", "media_type": ..., "data": <base64>}
+# Each provider path converts it to its own wire format.
+
+def _openai_content(content):
+    if isinstance(content, str):
+        return content
+    return [{"type": "text", "text": p["text"]} if p["type"] == "text" else
+            {"type": "image_url", "image_url": {"url": f"data:{p['media_type']};base64,{p['data']}"}}
+            for p in content]
+
+
+def _anthropic_content(content):
+    if isinstance(content, str):
+        return content
+    return [{"type": "text", "text": p["text"]} if p["type"] == "text" else
+            {"type": "image", "source": {"type": "base64", "media_type": p["media_type"],
+                                         "data": p["data"]}}
+            for p in content]
+
+
 class ProviderChain:
     def __init__(self, cfg: dict):
         cfg = cfg or {}
@@ -153,6 +174,7 @@ class ProviderChain:
         return "low" if t < 2048 else "medium" if t < 8192 else "high"
 
     def _stream_openai(self, e, messages, temp, max_tokens):
+        messages = [{**m, "content": _openai_content(m["content"])} for m in messages]
         kwargs = dict(model=e["model"], messages=messages, stream=True,
                       max_tokens=max_tokens, temperature=temp)
         eff = self._reasoning_effort()
@@ -176,7 +198,7 @@ class ProviderChain:
 
     def _stream_anthropic(self, e, messages, temp, max_tokens):
         system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
-        conv = [{"role": m["role"], "content": m["content"]}
+        conv = [{"role": m["role"], "content": _anthropic_content(m["content"])}
                 for m in messages if m["role"] in ("user", "assistant")]
         # anthropic SDK 1.x dropped `temperature` from the signature; send it raw
         # (llama.cpp-backed proxies still honor it).

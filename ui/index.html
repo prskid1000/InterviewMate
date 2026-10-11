@@ -72,6 +72,7 @@
   <div id="recRow">
     <button id="recBtn">▶ Listen</button>
     <button id="answerBtn" title="Send everything since the last answer">Answer</button>
+    <button id="shotBtn" title="Answer with a screenshot of the screen under the mouse">📷 Screen</button>
     <button id="cancelBtn" title="Cancel the answer" disabled>✕ Cancel</button>
     <span id="timer">0:00</span>
     <span id="pending" class="hint"></span>
@@ -188,6 +189,7 @@ function setRec(on) {
 
 $("recBtn").onclick = () => send({ type: "listen", on: !listening });
 $("answerBtn").onclick = () => send({ type: "answer" });
+$("shotBtn").onclick = () => send({ type: "screenshot" });
 $("cancelBtn").onclick = () => send({ type: "cancel" });
 $("clearBtn").onclick = () => send({ type: "clear" });
 $("profile").onchange = e => send({ type: "set_profile", name: e.target.value });
