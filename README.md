@@ -41,7 +41,8 @@ endpoints.
 - **Profiles** — technical / behavioral / system-design prompt templates, or add
   your own; switchable mid-interview.
 - **Configurable global hotkeys** — rebind any shortcut from the settings window.
-- **Free-first** — default providers are Gemini and Groq free tiers.
+- **Local-first** — the default provider is the local Telecode (llama.cpp)
+  proxy; free cloud tiers (Gemini, Groq, OpenRouter) are one click away as presets.
 
 ---
 
@@ -49,8 +50,8 @@ endpoints.
 
 - Windows 10/11
 - Python 3.10+ (developed on 3.12)
-- One free API key (Gemini recommended — no credit card):
-  https://aistudio.google.com/apikey
+- An answer provider: the local Telecode proxy on `127.0.0.1:1235` (default), or
+  a free cloud key, e.g. Gemini (https://aistudio.google.com/apikey)
 
 ## Setup
 
@@ -115,8 +116,14 @@ questions manually.
     copy in VRAM and no model-load wait at startup. If VoxType disappears
     mid-session, transcription switches to the built-in model automatically.
   - **VoxType API only** — never load a local model; error if VoxType is down.
-  - **Built-in model only** — always load faster-whisper (`large-v3` on CUDA
-    float16, automatic CPU int8 fallback; use `small.en` on CPU-only machines).
+  - **Built-in model only** — always load our own Whisper. It's VoxType's
+    transformers backend ported, so it shares VoxType's HF cache (no second
+    download) and its knobs: model (HF repo id), device, precision, CPU
+    threads, task, and under *Decoding* / *Performance* beams, temperature,
+    repetition penalty, initial prompt, attention, warm-up, torch.compile.
+    Default `openai/whisper-large-v3` on CUDA fp16 with automatic CPU fp32
+    fallback; use `openai/whisper-small.en` on CPU-only machines. Both channels
+    share one loaded copy.
   Hit **Test** next to the URL to check VoxType before an interview.
 - **AI Model** — add answer providers. Types: `openai` (any OpenAI-compatible
   chat endpoint) or `anthropic` (Claude `/messages`). Tick to enable, reorder
@@ -139,11 +146,11 @@ carry its own inline key, or reference an environment variable (`api_key_env`).
 ## Free-tier reality
 
 - **Gemini** free tier is small and **per-model** (~20 requests/day for
-  `gemini-2.5-flash`). The defaults use `gemini-2.5-flash-lite` (its own quota).
+  `gemini-2.5-flash`). The preset uses `gemini-2.5-flash-lite` (its own quota).
   Transcription is local, so the quota is spent on answers only.
 - **Groq** free tier is far more generous (~14,400 chat req/day). For real
-  practice, get a free key at https://console.groq.com/keys, paste it into the
-  Groq row under **AI Model** and tick it.
+  practice, get a free key at https://console.groq.com/keys, then add the Groq
+  preset under **AI Model** and paste it in.
 
 ---
 

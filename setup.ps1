@@ -3,30 +3,36 @@
 .SYNOPSIS
     InterviewMate Setup — real-time interview assistant overlay for Windows.
 .DESCRIPTION
-    Creates a single venv (.venv), installs the Python deps
-    (PySide6 + PyAudioWPatch + faster-whisper + CUDA 12 runtime + fastapi + …),
-    pre-downloads the local Whisper STT model (large-v3), seeds a .env
-    template, and registers a scheduled task `InterviewMate` that auto-starts
-    at logon (hidden, via pythonw).
+    Creates a single venv (.venv), installs the Python deps (PySide6 +
+    PyAudioWPatch + torch/transformers + fastapi + …), pre-downloads the local
+    Whisper STT model (openai/whisper-large-v3, skipped if already in the HF
+    cache — e.g. from VoxType), seeds a .env template, and registers a
+    scheduled task `InterviewMate` that auto-starts at logon (hidden, via pythonw).
 
-    Transcription is 100% local (faster-whisper, no API key). It runs large-v3
-    on an NVIDIA GPU (CUDA, float16) for large-v3 accuracy at ~13x realtime, and
-    falls back to CPU int8 automatically if no GPU is present (functional but
-    slow for large-v3 — set stt.model=small.en in config.yaml for CPU-only PCs).
+    Transcription is 100% local (no API key) — either VoxType's speech API or
+    the built-in model, which is VoxType's transformers Whisper backend ported
+    (same HF cache). It runs on an NVIDIA GPU (CUDA, fp16) and falls back to CPU
+    fp32 if no GPU is present (slow for large-v3 — set
+    stt.model=openai/whisper-small.en in config.yaml for CPU-only PCs).
     Only the AI answer needs a provider key (Gemini / Groq), which you add in
     the app's Settings -> AI Model, or in .env (GEMINI_API_KEY=...).
 .PARAMETER InstallDir
     Repo / install root. Defaults to the folder this script lives in. Must contain copilot/.
 .PARAMETER PreloadModel
-    Download the Whisper large-v3 model now (~2.9 GB) instead of lazily on the
-    first transcription. Default $true.
+    Download the Whisper large-v3 model now (~3.1 GB) instead of lazily on the
+    first transcription. Default $true. No-op if it's already cached.
+.PARAMETER CudaVersion
+    torch wheel index: cu132 (default, CUDA 13.2 — same as VoxType), cu130,
+    cu124, or cpu.
 .PARAMETER RegisterTask
     Register + start the `InterviewMate` logon task. Default $true.
 #>
 param(
     [string]$InstallDir   = $PSScriptRoot,
     [bool]  $PreloadModel = $true,
-    [bool]  $RegisterTask = $true
+    [bool]  $RegisterTask = $true,
+    [ValidateSet("cu132", "cu130", "cu124", "cpu")]
+    [string]$CudaVersion  = "cu132"
 )
 
 $ErrorActionPreference = "Stop"
@@ -99,14 +105,20 @@ if (-not (Test-Path $venvPy)) {
 }
 & $venvPy -m pip install --upgrade pip --no-cache-dir --quiet 2>&1 | Out-Null
 
-Write-Host "    pip install -r requirements.txt (PySide6, faster-whisper, fastapi, …)..." -ForegroundColor DarkGray
+# torch first, from the CUDA wheel index — requirements.txt's bare `torch`
+# would otherwise resolve to the CPU build from PyPI.
+$torchIndex = "https://download.pytorch.org/whl/$CudaVersion"
+Write-Host "    pip install torch ($CudaVersion)..." -ForegroundColor DarkGray
+& $venvPip install torch "numpy>=1.26" --index-url $torchIndex --extra-index-url https://pypi.org/simple --no-cache-dir --quiet 2>&1 | Out-Null
+
+Write-Host "    pip install -r requirements.txt (PySide6, transformers, fastapi, …)..." -ForegroundColor DarkGray
 & $venvPip install -r (Join-Path $InstallDir "requirements.txt") --no-cache-dir --quiet 2>&1 | Out-Null
 
 if (-not (Test-Path "$venv\Lib\site-packages\PySide6"))     { Fail "PySide6 install failed (overlay UI)" }
-if (-not (Test-Path "$venv\Lib\site-packages\faster_whisper")) { Fail "faster-whisper install failed (local STT)" }
+if (-not (Test-Path "$venv\Lib\site-packages\torch"))       { Fail "torch install failed (local STT)" }
+if (-not (Test-Path "$venv\Lib\site-packages\transformers")) { Fail "transformers install failed (local STT)" }
 if (-not (Test-Path "$venv\Lib\site-packages\pyaudiowpatch")) { Fail "PyAudioWPatch install failed (WASAPI capture)" }
 if (-not (Test-Path "$venv\Lib\site-packages\fastapi"))     { Fail "fastapi install failed (server)" }
-if (-not (Test-Path "$venv\Lib\site-packages\nvidia\cublas")) { Warn "nvidia-cublas-cu12 missing — GPU disabled, STT will use CPU (slow for large-v3)" }
 Ok "Core deps installed (UI + local Whisper STT + capture + server)"
 
 # ─── GPU check ───────────────────────────────────────────────────────
@@ -114,32 +126,34 @@ Ok "Core deps installed (UI + local Whisper STT + capture + server)"
 Step "Checking for an NVIDIA GPU (CUDA)"
 $gpu = & $venvPy -c @"
 try:
-    import ctranslate2 as c
-    n = c.get_cuda_device_count()
-    print('cuda' if n > 0 else 'cpu')
+    import torch
+    print('cuda' if torch.cuda.is_available() else 'cpu')
 except Exception:
     print('cpu')
 "@ 2>&1
-if ("$gpu".Trim() -eq 'cuda') { Ok "CUDA GPU detected — large-v3 will run on the GPU (float16)" }
-else { Warn "No CUDA GPU — STT falls back to CPU. large-v3 is slow on CPU; consider stt.model=small.en in config.yaml" }
+if ("$gpu".Trim() -eq 'cuda') { Ok "CUDA GPU detected — large-v3 will run on the GPU (fp16)" }
+else { Warn "No CUDA GPU — STT falls back to CPU. large-v3 is slow on CPU; consider stt.model=openai/whisper-small.en in config.yaml" }
 
 # ─── Pre-download the local STT model (large-v3) ─────────────────────
 
 if ($PreloadModel) {
-    Step "Pre-downloading local Whisper model (large-v3, ~2.9 GB)"
-    # Sets a socket timeout so a stalled connection errors + retries instead of
-    # hanging forever. Loads on CPU int8 only to cache the weights (fast); the
-    # app loads them on GPU float16 at runtime.
+    Step "Pre-downloading local Whisper model (openai/whisper-large-v3, ~3.1 GB)"
+    # Shared HF cache: a no-op if VoxType already pulled it. The allow/ignore
+    # patterns (same as VoxType's setup) fetch only model.safetensors + configs
+    # — an unfiltered snapshot of this repo is ~24 GB of redundant formats.
     $rc = & $venvPy -c @"
-import os, sys, time
+import os, sys
 os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '30')
-from faster_whisper import WhisperModel
+from huggingface_hub import snapshot_download
 for attempt in range(1, 6):
     try:
-        WhisperModel('large-v3', device='cpu', compute_type='int8')
+        snapshot_download('openai/whisper-large-v3',
+            allow_patterns=['model.safetensors', 'model-*-of-*.safetensors',
+                            'model.safetensors.index.json', '*.json', '*.txt'],
+            ignore_patterns=['*fp32*', '*fp16*', '*bf16*', '*fp8*', '*int8*', '*int4*'])
         print('ok'); break
     except Exception as e:
-        print('retry %d: %s' % (attempt, e), file=sys.stderr); time.sleep(3)
+        print('retry %d: %s' % (attempt, e), file=sys.stderr)
 else:
     sys.exit(1)
 "@ 2>&1
@@ -214,7 +228,8 @@ Write-Host @"
   InterviewMate is running as a frameless overlay (hidden from screen
   recording / share by default). It auto-starts at every logon.
 
-  - Transcription: local Whisper large-v3 (GPU/CUDA, CPU fallback) — offline, no API key.
+  - Transcription: VoxType's speech API, or the built-in Whisper large-v3
+    (transformers, GPU/CUDA with CPU fallback) — offline, no API key.
   - AI answers: add a Gemini/Groq key in Settings, or .env (GEMINI_API_KEY).
 
   Hotkeys (global):

@@ -20,14 +20,18 @@ DEFAULT_CONFIG = {
     #                     a second copy), else load our own model below
     #           voxtype → VoxType only; error if it isn't reachable
     #           local   → always load our own model
-    # local mode: large-v3 on CUDA (float16) = large-v3 accuracy AND ~13x
-    # realtime (needs an NVIDIA GPU + nvidia-cublas-cu12 / nvidia-cudnn-cu12).
-    # Falls back to CPU int8 if CUDA is unavailable (functional but slow for
-    # large-v3 — set model=small.en for CPU-only machines). (Audio preprocessing
-    # was tried and reverted — it hurt accuracy; Whisper prefers the raw signal.)
+    # local mode: VoxType's transformers Whisper backend, ported (same HF cache,
+    # same knobs). model = HF repo id or local path. dtype auto = fp16 on CUDA,
+    # fp32 on CPU; falls back to CPU if CUDA is unavailable (slow for large-v3 —
+    # use openai/whisper-small.en on CPU-only machines). cpu_threads 0 = torch
+    # default (one per physical core). (Audio preprocessing was tried and
+    # reverted — it hurt accuracy; Whisper prefers the raw signal.)
     "stt": {"engine": "auto", "voxtype_url": "http://127.0.0.1:6600",
-            "language": "en", "model": "large-v3", "device": "cuda",
-            "compute_type": "float16", "beam_size": 5},
+            "language": "en", "model": "openai/whisper-large-v3", "device": "cuda",
+            "dtype": "auto", "attn_impl": "auto", "torch_compile": False,
+            "warmup": True, "cpu_threads": 0,
+            "task": "transcribe", "num_beams": 1, "temperature": 0.0,
+            "repetition_penalty": 1.0, "initial_prompt": ""},
     "overlay": {"enabled": True, "exclude_from_capture": True, "opacity": 1.0},
     "hotkeys": {
         "record_toggle": "ctrl+space", "open_config": "ctrl+alt+c",
@@ -39,12 +43,9 @@ DEFAULT_CONFIG = {
     },
     "llm": {
         "providers": [
-            {"name": "Gemini", "api_type": "openai",
-             "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-             "model": "gemini-2.5-flash-lite", "api_key_env": "GEMINI_API_KEY", "enabled": True},
-            {"name": "Groq", "api_type": "openai",
-             "base_url": "https://api.groq.com/openai/v1",
-             "model": "llama-3.3-70b-versatile", "api_key_env": "GROQ_API_KEY", "enabled": False},
+            {"name": "Telecode local (llama.cpp)", "api_type": "anthropic",
+             "base_url": "http://127.0.0.1:1235", "model": "qwen3.6-35b",
+             "api_key": "local", "enabled": True},
         ],
         "history_exchanges": 12, "max_tokens": 900, "temperature": 0.4,
         "disable_thinking": True, "thinking_tokens": 0,

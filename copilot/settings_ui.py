@@ -595,16 +595,52 @@ class SettingsWindow(QWidget):
         eb.addWidget(self.stt_vox_status)
         lay.addWidget(ec)
 
-        mc, mb = _card("Built-in model", "used when the engine is Local, or as the Auto fallback")
-        self.stt_model = QLineEdit(); self.stt_model.setPlaceholderText("large-v3")
+        mc, mb = _card("Built-in model", "Local engine / Auto fallback — VoxType's Whisper backend")
+        self.stt_model = QLineEdit(); self.stt_model.setPlaceholderText("openai/whisper-large-v3")
         mb.addWidget(_row("Whisper model", self.stt_model,
-                          "large-v3 on an NVIDIA GPU. CPU-only machines should use small.en."))
+                          "HF repo id or local path. Already cached if VoxType uses it. "
+                          "CPU-only machines: openai/whisper-small.en."))
         self.stt_device = QComboBox(); self.stt_device.addItem("GPU (CUDA)", "cuda"); self.stt_device.addItem("CPU", "cpu")
         mb.addWidget(_row("Device", self.stt_device, "GPU falls back to CPU automatically if CUDA is unavailable."))
-        self.stt_beam = QSpinBox(); self.stt_beam.setRange(1, 10)
-        mb.addWidget(_row("Beam size", self.stt_beam, "Higher = slightly better accuracy, slower."))
+        self.stt_dtype = QComboBox()
+        for val, label in (("auto", "Auto"), ("fp16", "fp16 (GPU fast)"),
+                           ("bf16", "bf16 (Ampere+)"), ("fp32", "fp32 (accurate)")):
+            self.stt_dtype.addItem(label, val)
+        mb.addWidget(_row("Precision", self.stt_dtype, "auto = fp16 on GPU, fp32 on CPU."))
+        self.stt_threads = QSpinBox(); self.stt_threads.setRange(0, os.cpu_count() or 64)
+        self.stt_threads.setSpecialValueText("Auto (all cores)")
+        mb.addWidget(_row("CPU threads", self.stt_threads,
+                          "Torch threads on CPU. Auto = one per physical core."))
         self.stt_lang = QLineEdit(); self.stt_lang.setPlaceholderText("en")
         mb.addWidget(_row("Language", self.stt_lang, "ISO code sent to both engines. Blank = auto-detect."))
+        self.stt_task = QComboBox()
+        self.stt_task.addItem("Transcribe", "transcribe"); self.stt_task.addItem("Translate → English", "translate")
+        mb.addWidget(_row("Task", self.stt_task, "translate = English output regardless of the spoken language."))
+
+        dec = Collapsible("Decoding")
+        self.stt_beam = QSpinBox(); self.stt_beam.setRange(1, 10)
+        dec.add(_row("Beams", self.stt_beam, "1 = greedy, fastest. Higher = lower WER but ~N× slower."))
+        self.stt_temp = QDoubleSpinBox(); self.stt_temp.setRange(0, 1); self.stt_temp.setSingleStep(0.05)
+        dec.add(_row("Temperature", self.stt_temp,
+                     "0 = deterministic (recommended). 0.2–0.4 helps noisy mics where greedy stalls."))
+        self.stt_rep = QDoubleSpinBox(); self.stt_rep.setRange(1, 2); self.stt_rep.setSingleStep(0.05)
+        dec.add(_row("Repetition penalty", self.stt_rep, "1.0 = off. 1.1–1.3 if it loops on filler sounds."))
+        self.stt_prompt = QLineEdit(); self.stt_prompt.setPlaceholderText("e.g. Kubernetes, gRPC, PostgreSQL")
+        dec.add(_row("Initial prompt", self.stt_prompt, "Biases decoding toward jargon, acronyms, names."))
+        mb.addWidget(dec)
+
+        perf = Collapsible("Performance")
+        self.stt_attn = QComboBox()
+        for val, label in (("auto", "Auto"), ("sdpa", "SDPA"), ("flash_attention_2", "Flash-Attn 2"),
+                           ("eager", "Eager (compat)")):
+            self.stt_attn.addItem(label, val)
+        perf.add(_row("Attention", self.stt_attn,
+                      "auto = transformers picks (SDPA). Flash-Attn 2 needs fp16/bf16 + the flash-attn wheel."))
+        self.stt_warmup = QCheckBox("Warm up on load (first real transcription isn't slow)")
+        perf.add(self.stt_warmup)
+        self.stt_compile = QCheckBox("torch.compile (~20–40% faster steady-state; slow first load)")
+        perf.add(self.stt_compile)
+        mb.addWidget(perf)
         lay.addWidget(mc); lay.addStretch(1)
         return scroll
 
@@ -719,10 +755,19 @@ class SettingsWindow(QWidget):
         self.stt_engine.setCurrentIndex(max(0, self.stt_engine.findData(eng)))
         self.stt_vox_url.setText(st.get("voxtype_url") or "http://127.0.0.1:6600")
         self.stt_vox_status.setText("")
-        self.stt_model.setText(st.get("model") or "large-v3")
+        self.stt_model.setText(st.get("model") or "openai/whisper-large-v3")
         self.stt_device.setCurrentIndex(max(0, self.stt_device.findData(st.get("device") or "cuda")))
-        self.stt_beam.setValue(int(st.get("beam_size", 5)))
+        self.stt_dtype.setCurrentIndex(max(0, self.stt_dtype.findData(st.get("dtype") or "auto")))
+        self.stt_threads.setValue(int(st.get("cpu_threads") or 0))
         self.stt_lang.setText(st.get("language") or "")
+        self.stt_task.setCurrentIndex(max(0, self.stt_task.findData(st.get("task") or "transcribe")))
+        self.stt_beam.setValue(int(st.get("num_beams") or st.get("beam_size") or 1))
+        self.stt_temp.setValue(float(st.get("temperature") or 0.0))
+        self.stt_rep.setValue(float(st.get("repetition_penalty") or 1.0))
+        self.stt_prompt.setText(st.get("initial_prompt") or "")
+        self.stt_attn.setCurrentIndex(max(0, self.stt_attn.findData(st.get("attn_impl") or "auto")))
+        self.stt_warmup.setChecked(bool(st.get("warmup", True)))
+        self.stt_compile.setChecked(bool(st.get("torch_compile", False)))
 
         ov = CFG.get("overlay", {}) or {}
         self.opacity.setValue(float(ov.get("opacity", 1.0)))
@@ -791,18 +836,25 @@ class SettingsWindow(QWidget):
         cfg["overlay"] = {**(CFG.get("overlay", {}) or {}),
                           "opacity": round(self.opacity.value(), 2),
                           "exclude_from_capture": self.hide_capture.isChecked()}
-        st_old = CFG.get("stt", {}) or {}
-        dev = self.stt_device.currentData() or "cuda"
-        # keep a hand-tuned compute_type only while the device is unchanged
-        ctype = st_old.get("compute_type") if dev == (st_old.get("device") or "cuda") else None
+        # drop the faster-whisper-era keys (compute_type / beam_size)
+        st_old = {k: v for k, v in (CFG.get("stt", {}) or {}).items()
+                  if k not in ("compute_type", "beam_size")}
         cfg["stt"] = {**st_old,
                       "engine": self.stt_engine.currentData() or "auto",
                       "voxtype_url": self.stt_vox_url.text().strip() or "http://127.0.0.1:6600",
                       "language": self.stt_lang.text().strip(),
-                      "model": self.stt_model.text().strip() or "large-v3",
-                      "device": dev,
-                      "compute_type": ctype or ("float16" if dev == "cuda" else "int8"),
-                      "beam_size": self.stt_beam.value()}
+                      "model": self.stt_model.text().strip() or "openai/whisper-large-v3",
+                      "device": self.stt_device.currentData() or "cuda",
+                      "dtype": self.stt_dtype.currentData() or "auto",
+                      "attn_impl": self.stt_attn.currentData() or "auto",
+                      "torch_compile": self.stt_compile.isChecked(),
+                      "warmup": self.stt_warmup.isChecked(),
+                      "cpu_threads": self.stt_threads.value(),
+                      "task": self.stt_task.currentData() or "transcribe",
+                      "num_beams": self.stt_beam.value(),
+                      "temperature": round(self.stt_temp.value(), 2),
+                      "repetition_penalty": round(self.stt_rep.value(), 2),
+                      "initial_prompt": self.stt_prompt.text().strip()}
         cfg["audio"] = {**(CFG.get("audio", {}) or {}),
                         "auto_silence": self.auto_silence.isChecked(),
                         "silence_seconds": round(self.silence_secs.value(), 1),

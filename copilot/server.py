@@ -173,7 +173,7 @@ class Copilot:
         dev = getattr(self.stt_int, "device", "?")
         if dev == "voxtype":
             return "VoxType speech API"
-        model = (CFG.get("stt", {}) or {}).get("model", "large-v3")
+        model = (CFG.get("stt", {}) or {}).get("model") or "openai/whisper-large-v3"
         return f"Whisper {model} on {dev.upper()}"
 
     def _init_stt(self):
@@ -184,7 +184,8 @@ class Copilot:
         stt_cfg = CFG.get("stt", {}) or {}
         self._stt_cfg_key = self._stt_key()
         try:
-            # one backend per channel so both channels transcribe in parallel
+            # one backend per channel: VoxType gets two HTTP clients; the built-in
+            # model hands both channels the same shared instance (one copy in RAM)
             self.stt_int = make_stt(stt_cfg, self.status)
             self.stt_me = make_stt(stt_cfg)
             self.stt = self.stt_me     # back-compat alias
@@ -195,7 +196,7 @@ class Copilot:
             self.status(f"Speech engine unavailable: {e}", "error")
             return
         if stt_cfg.get("device", "cuda") == "cuda" and getattr(self.stt_int, "device", "") == "cpu":
-            self.status(f"GPU unavailable — using CPU (slow for {stt_cfg.get('model', 'large-v3')}). "
+            self.status(f"GPU unavailable — using CPU (slow for {stt_cfg.get('model') or 'openai/whisper-large-v3'}). "
                         f"{self.stt_int.fallback_reason}", "error")
         self._start_seg_workers()
         mode = "Auto-answer on." if self.auto_silence else "Press the hotkey to ask."

@@ -33,7 +33,7 @@ python -m venv .venv
 | `overlay.py` | ONE merged, all-edge-resizable window: `Hud` paints the top BAR (status glyph + two vertical-bar equalizer meters + a settings gear at the right — the BAR has no child widgets, so its controls are painted glyphs with click zones tested in `mouseReleaseEvent`: `_gear_rect()` → `_open_settings`, `x < 52` → ask now) and hosts `SessionTabs` + `AnswerView` (the streamed answer) below it. Capture-hidden + opacity from `overlay.*`; geometry/visibility/collapse persisted. Subscribes to `Copilot.listeners` via a Qt `Signal`. |
 | `settings_ui.py` | Native `SettingsWindow` (sidebar + pages — `SECTIONS` order must match the builder tuple in `_build`), `ProviderEditor` (the custom-provider list, now used by AI Model only), the **Speech** page (`_page_speech`: engine combo + VoxType URL/Test + built-in model), hotkey capture. |
 | `llm.py` | `ProviderChain` — user-defined chat providers. Supports `openai` (OpenAI SDK, streaming) and `anthropic` (Anthropic SDK, `messages.stream`). No hardcoded providers. Entries on a local host are flagged `local` → TCP-preflighted by `local_endpoint_up()` and skipped fast when dark, and their clients get `timeout=90, max_retries=0`. |
-| `stt.py` | `make_stt(cfg, on_status)` picks the engine from `stt.engine`: **`voxtype`** (`VoxTypeSTT` → VoxType's embedded OpenAI server, default `127.0.0.1:6600`) or **`local`** (`LocalSTT`, faster-whisper large-v3 on CUDA float16, CPU int8 fallback). `auto` = VoxType if `voxtype_probe()` says it's up, else local. Prefer VoxType — its Whisper is already resident on the GPU, so we skip a second copy in VRAM and the startup load. `SttChain` + the cloud `openai`/`gemini` classes are legacy, not offered in the UI. |
+| `stt.py` | `make_stt(cfg, on_status)` picks the engine from `stt.engine`: **`voxtype`** (`VoxTypeSTT` → VoxType's embedded OpenAI server, default `127.0.0.1:6600`) or **`local`** (`LocalSTT`, a port of VoxType's transformers `_WhisperHandler` — same HF cache and knobs, large-v3 on CUDA fp16, CPU fp32 fallback; long-form path for >30 s; both channels share one instance via `_shared_local`). `auto` = VoxType if `voxtype_probe()` says it's up, else local. Prefer VoxType — its Whisper is already resident on the GPU, so we skip a second copy in VRAM and the startup load. `SttChain` + the cloud `openai`/`gemini` classes are legacy, not offered in the UI. |
 | `audio.py` | `AudioEngine` — PyAudioWPatch capture. `candidate` = default mic, `interviewer` = default WASAPI loopback. Resamples to 16 kHz mono float32. |
 | `profiles.py` | CRUD for `profiles/*.md` (YAML frontmatter + body): `save_profile`/`delete_profile`. Each profile has its own **context files** in `context/<id>/` (`list_/set_context_files`), injected via `context_block()` and available as `{{title}}` template vars. Loose files at the top of `context/` remain shared vars. |
 | `config.py` | `load_config()` / `save_config()` over `config.yaml`; `CFG` is the shared live dict. |
@@ -75,8 +75,11 @@ names. Each entry:
 
 ```yaml
 stt: { engine: auto|voxtype|local, voxtype_url: http://127.0.0.1:6600,
-       language: en, model: large-v3, device: cuda, compute_type: float16,
-       beam_size: 5 }
+       language: en, model: openai/whisper-large-v3, device: cuda|cpu,
+       dtype: auto|fp16|bf16|fp32, attn_impl: auto|sdpa|flash_attention_2|eager,
+       torch_compile: false, warmup: true, cpu_threads: 0,   # 0 = torch default
+       task: transcribe|translate, num_beams: 1, temperature: 0.0,
+       repetition_penalty: 1.0, initial_prompt: "" }
 ```
 
 Prefer **VoxType** (`C:\Users\prith\.voxtype`) when it's running: it keeps
@@ -91,8 +94,18 @@ trip on localhost is ~0.4 s for a 4 s utterance.
 - Any backend must expose `.transcribe(np.float32 @16k) -> str` and a `.device`
   string (`"voxtype"` / `"cuda"` / `"cpu"`) — `_stt_label` and the failover check
   read `.device`.
-- Both channels get their **own** backend instance so they transcribe in
-  parallel (VoxType serializes them inside its engine worker; that's fine).
+- VoxType: each channel gets its own HTTP client (VoxType serializes them inside
+  its engine worker; that's fine). Built-in: both channels get the **same**
+  `LocalSTT` (`_shared_local`, keyed on the load-affecting settings in
+  `_LOAD_KEYS`); its lock serializes them. Decode options (task/beams/temp/…)
+  are pushed onto the live instance without reloading weights.
+- `LocalSTT` mirrors VoxType's `_WhisperHandler`: keep the **30-second trap**
+  handling (audio > 30 s needs `truncation=False` + `padding="longest"` +
+  attention mask + `return_timestamps=True` and **no** `max_new_tokens`, or the
+  tail is silently dropped). Old faster-whisper names (`large-v3`, `small.en`)
+  map to `openai/whisper-*`; legacy `beam_size` is read as `num_beams`.
+- torch is installed from the CUDA wheel index in `setup.ps1` (cu132, as in
+  VoxType); requirements.txt's bare `torch` would be a CPU build.
 
 ## Prompt assembly (`server._answer`)
 

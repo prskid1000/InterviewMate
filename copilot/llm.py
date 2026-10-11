@@ -169,14 +169,18 @@ class ProviderChain:
         system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
         conv = [{"role": m["role"], "content": m["content"]}
                 for m in messages if m["role"] in ("user", "assistant")]
-        kwargs = dict(model=e["model"], max_tokens=self.max_tokens, temperature=temp,
-                      system=system or None, messages=conv)
+        # anthropic SDK 1.x dropped `temperature` from the signature; send it raw
+        # (llama.cpp-backed proxies still honor it).
+        kwargs: dict = dict(model=e["model"], max_tokens=self.max_tokens, messages=conv,
+                      extra_body={"temperature": temp})
+        if system:
+            kwargs["system"] = system
         # extended thinking with an explicit token budget (Anthropic requires
         # max_tokens > budget and temperature = 1 while thinking).
         if not self.disable_thinking and self.thinking_tokens > 0:
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": self.thinking_tokens}
             kwargs["max_tokens"] = max(self.max_tokens, self.thinking_tokens + 512)
-            kwargs["temperature"] = 1.0
+            kwargs["extra_body"]["temperature"] = 1.0
         with self._client(e).messages.stream(**kwargs) as stream:
             for text in stream.text_stream:
                 if text:

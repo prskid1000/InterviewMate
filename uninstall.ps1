@@ -62,15 +62,8 @@ if ($present) {
     }
 }
 
-# 5. Cached Whisper model (shared HF cache — only offer if present)
-$hub = Join-Path $env:USERPROFILE ".cache\huggingface\hub"
-$whisper = Join-Path $hub "models--Systran--faster-whisper-large-v3"
-if (Test-Path $whisper) {
-    $confirm = Read-Host "  Delete the cached Whisper model at $whisper (~2.9 GB)? (y/N)"
-    if ($confirm -eq 'y') {
-        Remove-Item -Recurse -Force $whisper -ErrorAction SilentlyContinue
-        Ok "Removed cached model"
-    }
-}
+# 5. The Whisper model lives in the shared HF cache
+#    (~\.cache\huggingface\hub\models--openai--whisper-large-v3) and is also
+#    VoxType's — deliberately not offered for deletion here.
 
 Write-Host "`n  Uninstall complete. (The repo files themselves were left in place.)`n" -ForegroundColor Green
