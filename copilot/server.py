@@ -7,9 +7,9 @@ Manual flow (buttons on the HUD / browser UI):
             mostly done before you ask. Nothing is sent to the LLM yet.
   Answer    closes the current turn: both channels' remaining audio is cut and
             transcribed, every chunk of the turn is merged by the time it was
-            spoken ("Interviewer: … / Me: …") and sent; the answer streams back.
+            spoken ("Interviewer: … / Me: …") and sent; the answer streams back
+            (it continues / improves my attempt if I'd started answering).
             Listening carries on — the next turn starts at that moment.
-  Improve   same, but asks to improve what *I* said.
   Cancel    aborts the answer (closes the provider's HTTP stream).
   ■ Stop    closes both devices; audio already captured still belongs to the
             open turn, so Answer after Stop works.
@@ -444,12 +444,9 @@ class Copilot:
     def ask_now(self):
         self.close_turn("answer")
 
-    def improve(self):
-        self.close_turn("improve")
-
     def close_turn(self, mode: str):
-        """Answer / Improve: cut both channels and close the open turn; the
-        manager sends it once every chunk of it is transcribed."""
+        """Answer: cut both channels and close the open turn; the manager sends
+        it once every chunk of it is transcribed."""
         with self._cap_lock:
             for ch in self._cap:
                 self._cut(ch, at_quiet=False)
@@ -539,20 +536,11 @@ class Copilot:
 
     def _send_turn(self, mode: str, lines):
         convo = self._render_lines(lines)
-        said_me = any(sp == "me" for _, sp, _ in lines)
-        if mode == "improve":
-            if not said_me:
-                self.status("Nothing from you since the last answer — say something first, "
-                            "or press Answer.")
-                return
-            ask = ("Improve what I said — fix mistakes, fill gaps, make it stronger. "
-                   "Give me the improved version to say now.")
-        else:
-            if not convo:
-                self.status("Nothing captured since the last answer.")
-                return
-            ask = ("Give me what to say now. If I already started answering, continue and "
-                   "improve it rather than repeating it.")
+        if not convo:
+            self.status("Nothing captured since the last answer.")
+            return
+        ask = ("Give me what to say now. If I already started answering, continue and "
+               "improve it rather than repeating it.")
         user = f"Conversation since my last answer:\n{convo}\n\n{ask}"
         self.answer(user, convo, mode)
 
@@ -719,8 +707,6 @@ async def ws_endpoint(ws: WebSocket):
                 CO.start_listening() if m.get("on", True) else CO.stop_listening()
             elif t == "answer":
                 CO.ask_now()
-            elif t == "improve":
-                CO.improve()
             elif t == "cancel":
                 CO.cancel()
             elif t in ("ask", "say"):        # typed: interviewer's question / what I said

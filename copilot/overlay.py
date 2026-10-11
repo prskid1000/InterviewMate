@@ -4,10 +4,10 @@ A single frameless, capture-hidden window that stacks:
   • the top BAR — status glyph + both live level meters (INTERVIEWER / YOU)
   • the answer area — streams the AI answer as one continuous session
 
-Drag the bar to move; the button row under it drives everything (▶ Listen /
-■ Stop, Answer, Improve, ✕ cancel); the gear at the right of the bar opens
-settings; right-click for the menu; resize from any edge/corner. The only
-hotkey shows / hides the whole overlay. Position, size, visibility and
+Drag the bar to move; three painted icon buttons at its right end drive it:
+Listen (● → ■ stop), Answer (✦ → ✕ cancel while answering) and the settings
+gear; right-click for the menu; resize from any edge/corner. The only hotkey
+shows / hides the whole overlay. Position, size, visibility and
 collapsed state all persist across restarts.
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ from PySide6.QtGui import (
     QBrush, QColor, QLinearGradient, QMouseEvent, QPainter, QPainterPath, QPen,
 )
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QToolTip, QVBoxLayout, QWidget,
 )
 
 from .config import CFG
@@ -321,64 +321,6 @@ class SessionTabs(QWidget):
         self._lay.addStretch(1)
 
 
-class Controls(QWidget):
-    """The button row under the meter bar: ▶ Listen / ■ Stop, Answer, Improve,
-    Cancel, plus a small note (chunks still transcribing). Always visible, even
-    with the answer panel collapsed."""
-
-    H = 36
-    _BTN = ("QPushButton{{background:{bg};color:{fg};border:1px solid {bd};border-radius:7px;"
-            "padding:3px 10px;font:600 11px 'Segoe UI';}}"
-            "QPushButton:hover:enabled{{border:1px solid {hv};}}"
-            "QPushButton:disabled{{color:#4a5468;border:1px solid #1c2330;}}")
-
-    def __init__(self, co):
-        super().__init__()
-        self.co = co
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedHeight(self.H)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 4, 12, 4)
-        lay.setSpacing(6)
-
-        def btn(text, tip, slot):
-            b = QPushButton(text)
-            b.setToolTip(tip)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            b.clicked.connect(slot)
-            lay.addWidget(b)
-            return b
-
-        self.listen = btn("▶ Listen", "Start / stop capturing the interviewer + your mic",
-                          co.toggle_listening)
-        self.answer = btn("Answer", "Send everything since the last answer and get what to say",
-                          co.ask_now)
-        self.improve = btn("Improve", "Improve what you said since the last answer", co.improve)
-        self.cancel = btn("✕", "Cancel the answer", co.cancel)
-        self.note = QLabel("")
-        self.note.setStyleSheet("color:#7c8aa5; font:11px 'Segoe UI'; background:transparent;")
-        lay.addWidget(self.note, 1)
-        self.set_state(False, False, 0)
-
-    def set_state(self, listening: bool, answering: bool, pending: int):
-        if listening:
-            self.listen.setText("■ Stop")
-            self.listen.setStyleSheet(self._BTN.format(bg="rgba(239,68,68,0.16)", fg="#fca5a5",
-                                                       bd="#7f2d2d", hv="#f87171"))
-        else:
-            self.listen.setText("▶ Listen")
-            self.listen.setStyleSheet(self._BTN.format(bg="rgba(52,201,142,0.12)", fg="#6ee7b7",
-                                                       bd="#1f5c45", hv="#34d89e"))
-        plain = self._BTN.format(bg="rgba(255,255,255,0.04)", fg="#dce6f7", bd="#2a3446", hv="#6ba4ff")
-        self.answer.setStyleSheet(self._BTN.format(bg="rgba(107,164,255,0.16)", fg="#cfe0ff",
-                                                   bd="#36507e", hv="#6ba4ff"))
-        self.improve.setStyleSheet(plain)
-        self.cancel.setStyleSheet(plain)
-        self.cancel.setEnabled(answering)
-        self.note.setText(f"transcribing {pending}…" if pending else "")
-
-
 class Hud(ResizableMixin, QWidget):
     """The single overlay window: status glyph + dual meters in a top BAR,
     with the streaming answer area stacked beneath it."""
@@ -389,7 +331,9 @@ class Hud(ResizableMixin, QWidget):
     MIN_W = 280
     BAR_H = 58                 # height of the status/meter strip at the top
     DEFAULT_H = 320            # expanded height when no state is saved
-    GEAR_W = 32                # settings hit zone at the right end of the BAR
+    GEAR_W = 32                # width of each icon hit zone at the right end of the BAR
+    # icon buttons, right to left: settings, answer, listen
+    _ICONS = ("gear", "answer", "listen")
 
     def __init__(self, co, config_url: str):
         super().__init__()
@@ -399,7 +343,7 @@ class Hud(ResizableMixin, QWidget):
         self.setWindowFlags(_OVERLAY_FLAGS)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        self.init_resize(min_w=self.MIN_W, min_h=self.BAR_H + Controls.H)
+        self.init_resize(min_w=self.MIN_W, min_h=self.BAR_H)
 
         st = load_state()
         self._state = "idle"
@@ -408,17 +352,17 @@ class Hud(ResizableMixin, QWidget):
         self._moved = False
         self._int_disp = 0.0
         self._me_disp = 0.0
-        self._gear_hover = False
+        self._hover = None                 # which bar icon the mouse is over
+        self._listening = self._answering = False
+        self._pending = 0
         self._answer_expanded = bool(st.get("answer_expanded", True))
 
         # tabs + answer area live below the bar; the layout reserves the strip
-        self.controls = Controls(co)
         self.tabs = SessionTabs(self._switch_session, self._new_session, self._close_session)
         self.answer = AnswerView()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(1, self.BAR_H, 1, 1)
         lay.setSpacing(0)
-        lay.addWidget(self.controls)
         lay.addWidget(self.tabs)
         lay.addWidget(self.answer)
         self.tabs.setVisible(self._answer_expanded)
@@ -444,7 +388,7 @@ class Hud(ResizableMixin, QWidget):
             self.show()
 
     def _collapsed_h(self) -> int:
-        return self.BAR_H + Controls.H + 2
+        return self.BAR_H
 
     def _apply_overlay_cfg(self):
         """Opacity + capture-exclusion from config (called at start and after
@@ -468,9 +412,9 @@ class Hud(ResizableMixin, QWidget):
         elif t == "state":
             self._listening = bool(m.get("listening"))
             self._answering = bool(m.get("answering"))
-            self.controls.set_state(self._listening, self._answering, int(m.get("pending", 0)))
+            self._pending = int(m.get("pending", 0))
             if self._state != "error":
-                self._set(self._idle_state())
+                self._set(self._idle_state())   # repaints the icons too
         elif t == "answer_start":
             self._set("answering")
             self._set_answer_expanded(True)        # an answer forces the panel open
@@ -499,9 +443,9 @@ class Hud(ResizableMixin, QWidget):
 
     def _idle_state(self) -> str:
         """Glyph when nothing is flashing: answering > listening > idle."""
-        if getattr(self, "_answering", False):
+        if self._answering:
             return "answering"
-        return "recording" if getattr(self, "_listening", False) else "idle"
+        return "recording" if self._listening else "idle"
 
     def _flash_error(self):
         self._set("error")
@@ -615,18 +559,22 @@ class Hud(ResizableMixin, QWidget):
                 self._moved = True
             self.move(new)
             return
-        # gear hover — rz_move already reset the cursor to Arrow, so re-set it
-        hot = self._gear_rect().contains(e.position())
+        # icon hover — rz_move already reset the cursor to Arrow, so re-set it
+        hot = self._icon_at(e.position())
         if hot:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
-        if hot != self._gear_hover:
-            self._gear_hover = hot
+        if hot != self._hover:
+            self._hover = hot
+            if hot:
+                QToolTip.showText(e.globalPosition().toPoint(), self._icon_tip(hot), self)
+            else:
+                QToolTip.hideText()
             self.update()
 
     def leaveEvent(self, e):
         super().leaveEvent(e)
-        if self._gear_hover:
-            self._gear_hover = False
+        if self._hover:
+            self._hover = None
             self.update()
 
     def mouseReleaseEvent(self, e: QMouseEvent):
@@ -636,8 +584,13 @@ class Hud(ResizableMixin, QWidget):
             save_state(hud_x=self.x(), hud_y=self.y())
             px, py = getattr(self, "_press_x", 99), getattr(self, "_press_y", 99)
             if not self._moved and e.button() == Qt.MouseButton.LeftButton:
-                if self._gear_rect().contains(QPointF(px, py)):
-                    self._open_settings()        # gear at the right of the BAR
+                icon = self._icon_at(QPointF(px, py))
+                if icon == "gear":
+                    self._open_settings()
+                elif icon == "listen":
+                    self.co.toggle_listening()
+                elif icon == "answer":
+                    self.co.cancel() if self._answering else self.co.ask_now()
         self._drag = None
 
     def contextMenuEvent(self, e):
@@ -648,10 +601,9 @@ class Hud(ResizableMixin, QWidget):
             "QMenu::item{padding:7px 22px 7px 12px;border-radius:5px;margin:1px 2px;}"
             "QMenu::item:selected{background:#1a2030;}"
             "QMenu::separator{height:1px;background:#1e2636;margin:4px 6px;}")
-        lis = menu.addAction("Stop listening" if getattr(self, "_listening", False) else "Listen")
+        lis = menu.addAction("Stop listening" if self._listening else "Listen")
         lis.triggered.connect(self.co.toggle_listening)
         menu.addAction("Answer").triggered.connect(self.co.ask_now)
-        menu.addAction("Improve my answer").triggered.connect(self.co.improve)
         ans = menu.addAction("Collapse answer" if self._answer_expanded else "Expand answer")
         ans.triggered.connect(self._toggle_answer)
         menu.addSeparator()
@@ -694,32 +646,106 @@ class Hud(ResizableMixin, QWidget):
 
         lx = 62
         bx = lx + 78
-        bw = W - bx - 14 - self.GEAR_W        # keep the meters clear of the gear
+        bw = W - bx - 18 - len(self._ICONS) * self.GEAR_W   # keep the meters clear of the icons
         self._meter(p, lx, bx, bw, B * 0.32, "INTERVIEWER", self._int_disp, INT_COLOR)
         self._meter(p, lx, bx, bw, B * 0.68, "YOU", self._me_disp, ME_COLOR)
-        self._draw_gear(p, self._gear_rect())
+        self._draw_listen(p, self._icon_rect("listen"))
+        self._draw_answer(p, self._icon_rect("answer"))
+        self._draw_gear(p, self._icon_rect("gear"))
 
         # divider between the bar and the answer area (only when expanded)
-        p.setPen(QPen(QColor(255, 255, 255, 16), 1.0))
-        p.drawLine(12, B, W - 12, B)
-        if self._answer_expanded and H > B + Controls.H + 2:
-            p.drawLine(12, B + Controls.H, W - 12, B + Controls.H)
+        if self._answer_expanded and H > B + 2:
+            p.setPen(QPen(QColor(255, 255, 255, 16), 1.0))
+            p.drawLine(12, B, W - 12, B)
         p.end()
 
-    # ── settings gear ──
+    # ── icon buttons (listen · answer · settings) ──
 
-    def _gear_rect(self) -> QRectF:
-        """Click zone at the right end of the BAR (full bar height so it's easy
-        to hit on a small overlay)."""
-        return QRectF(self.width() - self.GEAR_W - 8, 0.0, self.GEAR_W, float(self.BAR_H))
+    def _icon_rect(self, name: str) -> QRectF:
+        """Click zone of a bar icon, right to left from the edge (full bar height
+        so it's easy to hit on a small overlay)."""
+        i = self._ICONS.index(name)
+        return QRectF(self.width() - 8 - (i + 1) * self.GEAR_W, 0.0, self.GEAR_W, float(self.BAR_H))
+
+    def _icon_at(self, pos: QPointF):
+        for name in self._ICONS:
+            if self._icon_rect(name).contains(pos):
+                return name
+        return None
+
+    def _icon_tip(self, name: str) -> str:
+        if name == "listen":
+            return "Stop listening" if self._listening else "Listen (mic + interviewer audio)"
+        if name == "answer":
+            if self._answering:
+                return "Cancel the answer"
+            return ("Answer — waiting for the last bit of audio to transcribe" if self._pending
+                    else "Answer — send everything since the last answer")
+        return "Settings"
+
+    def _icon_bg(self, p, cx, cy, name, tint=QColor(107, 164, 255)):
+        if self._hover == name:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(QColor(tint.red(), tint.green(), tint.blue(), 34)))
+            p.drawRoundedRect(QRectF(cx - 13, cy - 13, 26, 26), 8, 8)
+
+    def _draw_listen(self, p, r: QRectF):
+        """● (green) to start listening; pulsing ■ (red) while listening = stop."""
+        cx, cy = r.center().x(), r.center().y()
+        if self._listening:
+            red = QColor(248, 113, 113)
+            self._icon_bg(p, cx, cy, "listen", red)
+            pulse = 0.55 + 0.45 * abs(math.sin(self._phase / 9.0))
+            p.setPen(QPen(QColor(248, 113, 113, int(110 * pulse)), 2.0))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QRectF(cx - 9, cy - 9, 18, 18))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(red))
+            p.drawRoundedRect(QRectF(cx - 4.2, cy - 4.2, 8.4, 8.4), 1.6, 1.6)
+        else:
+            green = QColor(52, 216, 158)
+            self._icon_bg(p, cx, cy, "listen", green)
+            col = green if self._hover == "listen" else QColor(52, 216, 158, 200)
+            p.setPen(QPen(col, 1.8))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QRectF(cx - 8, cy - 8, 16, 16))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(col))
+            p.drawEllipse(QRectF(cx - 4, cy - 4, 8, 8))
+
+    def _draw_answer(self, p, r: QRectF):
+        """✦ sparkle = answer now; ✕ while an answer streams = cancel. An amber
+        dot marks audio still being transcribed."""
+        cx, cy = r.center().x(), r.center().y()
+        if self._answering:
+            red = QColor(248, 113, 113)
+            self._icon_bg(p, cx, cy, "answer", red)
+            p.setPen(QPen(red if self._hover == "answer" else QColor(232, 160, 160), 2.2,
+                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(cx - 5, cy - 5), QPointF(cx + 5, cy + 5))
+            p.drawLine(QPointF(cx + 5, cy - 5), QPointF(cx - 5, cy + 5))
+            return
+        violet = QColor(167, 139, 250)
+        self._icon_bg(p, cx, cy, "answer", violet)
+        col = violet if self._hover == "answer" else QColor(167, 139, 250, 215)
+        path = QPainterPath()
+        arm, waist = 8.0, 2.0
+        pts = ((0, -arm), (waist, -waist), (arm, 0), (waist, waist),
+               (0, arm), (-waist, waist), (-arm, 0), (-waist, -waist))
+        for j, (x, y) in enumerate(pts):
+            path.moveTo(cx + x, cy + y) if j == 0 else path.lineTo(cx + x, cy + y)
+        path.closeSubpath()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(col))
+        p.drawPath(path)
+        if self._pending:
+            p.setBrush(QBrush(QColor(245, 158, 11)))
+            p.drawEllipse(QRectF(cx + 5, cy - 9, 5, 5))
 
     def _draw_gear(self, p, r: QRectF):
-        hot = self._gear_hover
+        hot = self._hover == "gear"
         cx, cy = r.center().x(), r.center().y()
-        if hot:
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(QColor(107, 164, 255, 32)))
-            p.drawRoundedRect(QRectF(cx - 13, cy - 13, 26, 26), 8, 8)
+        self._icon_bg(p, cx, cy, "gear")
         col = QColor(107, 164, 255) if hot else QColor(132, 148, 172)
         p.save()
         p.translate(cx, cy)

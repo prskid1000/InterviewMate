@@ -52,7 +52,7 @@ STT_PRESETS = {
     "Custom…": ("openai", "", ""),
 }
 
-# Everything else (listen, answer, improve, cancel, settings, quit) is a HUD
+# Everything else (listen, answer, cancel, settings, quit) is a HUD
 # button or menu item — the one global hotkey just shows / hides the overlay.
 HK_ACTIONS = [("toggle_hud", "Show / hide the overlay")]
 

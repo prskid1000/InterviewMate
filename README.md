@@ -23,15 +23,16 @@ providers and paid ones can be added as custom endpoints.
 - **Dual-channel capture** — interviewer (WASAPI system-audio loopback) and you
   (microphone) on separate channels, so speakers are labelled perfectly without
   AI diarization. Works with Google Meet, Zoom, Teams, anything.
-- **Manual, button-driven** — ▶ Listen / ■ Stop opens and closes both
-  devices; **Answer** and **Improve** send when *you* decide; ✕ cancels.
-  Nothing is sent to the AI on its own.
+- **Manual, button-driven** — two icons on the HUD bar: **●** Listen / **■**
+  Stop opens and closes both devices; **✦** Answer sends when *you* decide (it
+  turns into **✕** to cancel while answering). Nothing is sent on its own.
 - **Fast Answer** — while you listen, audio is transcribed in the background in
   ~20 s chunks, so pressing Answer only waits for the last few seconds.
 - **Works on speakers** — an echo gate mutes your mic while the interviewer
   talks, and "you" lines that just repeat the interviewer are dropped.
-- **Merged HUD** — a bar with the status indicator and **live signal meters**
-  for INTERVIEWER and YOU, the button row, and the answer panel.
+- **Merged HUD** — one bar with the status indicator, **live signal meters**
+  for INTERVIEWER and YOU and the Listen / Answer / settings icons, over the
+  answer panel.
 - **Continuous session** — the answer panel accumulates the whole Q&A as one
   scrolling conversation; the AI keeps full history so deep follow-ups
   ("why?", "go deeper", "what's the trade-off?") stay consistent.
@@ -82,29 +83,30 @@ run.bat
 ```
 
 The overlay appears at the bottom-center of your screen. There is **no tray
-icon** — the controls are the HUD's button row, the **⚙ gear at the right of
-the bar** (settings), and the right-click menu (also Quit).
+icon** — the controls are the icons at the right of the HUD bar (● Listen,
+✦ Answer, ⚙ settings) and the right-click menu (also Quit).
 
 ---
 
 ## Using it
 
-| Button | Action |
-|--------|--------|
-| **▶ Listen / ■ Stop** | Open / close the mic and system-audio capture |
-| **Answer** | Send everything said since the last answer (interviewer + you, in order) and stream what to say |
-| **Improve** | Same, but improve what *you* said |
-| **✕** | Cancel the answer in progress |
+| Icon (HUD bar) | Action |
+|----------------|--------|
+| **●** Listen / **■** Stop | Open / close the mic and system-audio capture |
+| **✦** Answer | Send everything said since the last answer (interviewer + you, in order) and stream what to say — if you'd started answering, it continues / improves your attempt |
+| **✕** (while answering) | Cancel the answer |
+| **⚙** | Settings |
 
 The only hotkey, `Ctrl + Alt + B` (rebindable in **Settings → Hotkeys**), shows /
 hides the overlay.
 
-1. Press **▶ Listen** before the interview starts (it also wakes a local model
-   up, so the first answer isn't slow). Both meters move.
-2. When you want help, press **Answer**. Lines appear in the panel as they're
-   transcribed; the answer streams in. Listening carries on.
-3. If you started answering yourself, **Improve** polishes what you said.
-4. Follow-ups: just press Answer again — the AI keeps the whole session.
+1. Press **●** before the interview starts (it also wakes a local model up,
+   so the first answer isn't slow). Both meters move.
+2. When you want help, press **✦**. Lines appear in the panel as they're
+   transcribed; the answer streams in. Listening carries on. An amber dot on
+   ✦ means the last few seconds are still being transcribed.
+3. If you started answering yourself, ✦ continues / improves what you said.
+4. Follow-ups: just press ✦ again — the AI keeps the whole session.
 
 No audio device? Open the browser view at `http://127.0.0.1:8765` and type
 questions manually.
