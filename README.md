@@ -42,11 +42,10 @@ providers and paid ones can be added as custom endpoints.
   (OpenAI-compatible *or* Anthropic-compatible) and speech-to-text providers
   (OpenAI-compatible audio *or* Gemini). Tried top-first with automatic
   fallback on rate limits.
-- **Persona** — one editable box controls tone, format, length, and language of
-  every answer (ships tuned for concise, natural, speakable answers).
-- **Profiles** — technical / behavioral / system-design prompt templates, or add
+- **Profiles** — one prompt per profile sets the role, tone, format, length and
+  language of every answer; technical / behavioral / system-design templates, or add
   your own; switchable mid-interview.
-- **One hotkey** — show / hide the overlay (rebindable in Settings → Hotkeys).
+- **One hotkey** — show / hide the overlay (rebind it at the bottom-left of Settings).
 - **Local-first** — the default provider is the local Telecode (llama.cpp)
   proxy; free cloud tiers (Gemini, Groq, OpenRouter) are one click away as presets.
 
@@ -97,7 +96,7 @@ icon** — the controls are the icons at the right of the HUD bar (● Listen,
 | **✕** (while answering) | Cancel the answer |
 | **⚙** | Settings |
 
-The only hotkey, `Ctrl + Alt + B` (rebindable in **Settings → Hotkeys**), shows /
+The only hotkey, `Ctrl + Alt + B` (rebind it at the bottom-left of **Settings**), shows /
 hides the overlay.
 
 1. Press **●** before the interview starts (it also wakes a local model up,
@@ -138,11 +137,11 @@ questions manually.
   preset, telecode's Anthropic-compatible proxy on `:1235` — is a good top
   entry: no quota, no cost, and if telecode isn't running it's skipped in ~0.4 s
   and the next provider answers.
-- **Interview** — active profile, role/subject, the **Persona** box (how it
-  responds), and your resume + job description.
+- **Interview** — profiles: each one's prompt (role, tone, format, length,
+  language) plus its context files (resume, job description, …).
 - **Overlay & Audio** — opacity, hide-from-screen-share, the **echo gate**
   (keep on with speakers), the background chunk length, and the speech threshold.
-- **Hotkeys** — rebind show / hide.
+- **Show / hide hotkey** — bottom-left of the window, next to Close / Save & Apply.
 
 Presets in "Add provider" list **free-tier** options only (Gemini, Groq,
 OpenRouter). Paid providers (OpenAI, Anthropic) are added via **Custom…** —
@@ -167,7 +166,7 @@ carry its own inline key, or reference an environment variable (`api_key_env`).
 ```
 [System audio (loopback)] → "interviewer" ┐
                                            ├─ transcribe (VoxType API or local Whisper)
-[Microphone]              → "you"          ┘        → profile + persona + session history
+[Microphone]              → "you"          ┘        → profile + context files + session history
                                                     → AI chain (OpenAI/Anthropic, fallback)
                                                     → streamed answer in the overlay
 ```
@@ -178,7 +177,8 @@ to the configured AI provider.
 
 ## Configuration file
 
-`config.yaml` holds providers, hotkeys, persona, profile, and vars. The settings
+`config.yaml` holds providers, the hotkey, speech/audio/overlay options and the
+active profile (prompts and context files live in `profiles/` and `context/`). The settings
 window writes to it (comments are not preserved on save). API keys live in
 `.env` (referenced via `api_key_env`) or inline per provider.
 

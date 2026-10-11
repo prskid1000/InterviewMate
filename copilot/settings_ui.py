@@ -27,8 +27,7 @@ from .uikit import apply_capture_exclusion, load_state, save_state
 CONTEXT_DIR = ROOT / "context"
 
 SECTIONS = [("model", "🧠   AI Model"), ("interview", "💬   Interview"),
-            ("speech", "🎙   Speech"), ("behavior", "🎛   Overlay & Audio"),
-            ("about", "⌨   Hotkeys")]
+            ("speech", "🎙   Speech"), ("behavior", "🎛   Overlay & Audio")]
 
 STT_ENGINES = [("auto", "Auto (recommended)"), ("voxtype", "VoxType API only"),
                ("local", "Built-in model only")]
@@ -45,11 +44,6 @@ LLM_PRESETS = {
     "Groq (free)": ("openai", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
     "OpenRouter (free)": ("openai", "https://openrouter.ai/api/v1", "meta-llama/llama-3.3-70b-instruct:free"),
     "Custom… (OpenAI / Anthropic)": ("openai", "", ""),
-}
-STT_PRESETS = {
-    "Gemini (free)": ("gemini", "https://generativelanguage.googleapis.com/v1beta", "gemini-2.5-flash-lite"),
-    "Groq Whisper (free)": ("openai", "https://api.groq.com/openai/v1", "whisper-large-v3-turbo"),
-    "Custom…": ("openai", "", ""),
 }
 
 # Everything else (listen, answer, cancel, settings, quit) is a HUD
@@ -71,7 +65,7 @@ def _keyname(k) -> str:
 
 def _pretty_combo(combo: str) -> str:
     disp = {"ctrl": "Ctrl", "alt": "Alt", "shift": "Shift", "win": "Win", "space": "Space"}
-    return "  +  ".join(disp.get(p, p.upper() if len(p) == 1 else p.capitalize())
+    return " + ".join(disp.get(p, p.upper() if len(p) == 1 else p.capitalize())
                         for p in combo.split("+") if p)
 
 
@@ -83,7 +77,7 @@ def _page():
     scroll.setFrameShape(QFrame.Shape.NoFrame)
     content = QWidget(); content.setObjectName("content")
     lay = QVBoxLayout(content)
-    lay.setContentsMargins(22, 20, 22, 20)
+    lay.setContentsMargins(26, 22, 26, 22)     # same page padding as telecode's settings
     lay.setSpacing(15)
     scroll.setWidget(content)
     return scroll, lay
@@ -383,7 +377,7 @@ class SettingsWindow(QWidget):
         self.setWindowTitle("Interview Copilot — Settings")
         self.setStyleSheet(QSS)
         self.setObjectName("window_root")
-        self.setMinimumSize(440, 400)
+        self.setMinimumSize(740, 400)     # narrower and the pages scroll sideways (no right padding)
         st = load_state()
         self.resize(int(st.get("settings_w", 740)), int(st.get("settings_h", 660)))
         self._hk_captured.connect(self._on_hk_captured)
@@ -413,22 +407,30 @@ class SettingsWindow(QWidget):
         self._sidebar.currentRowChanged.connect(lambda i: self._stack.setCurrentIndex(i))
         self._stack = QStackedWidget()
         for builder in (self._page_model, self._page_interview, self._page_speech,
-                        self._page_behavior, self._page_about):
+                        self._page_behavior):
             self._stack.addWidget(builder())
         bl.addWidget(self._sidebar); bl.addWidget(self._stack, 1)
         root.addWidget(body, 1)
 
         foot = QWidget(); foot.setStyleSheet("background:#10141c;border-top:1px solid #171d28;")
-        fl = QHBoxLayout(foot); fl.setContentsMargins(18, 10, 18, 10)
+        # one row, every control the same 32 px height and vertically centred:
+        # [hotkey label + key] ......... [status] [Close] [Save & Apply]
+        fl = QHBoxLayout(foot); fl.setContentsMargins(18, 10, 18, 10); fl.setSpacing(10)
+        mid = Qt.AlignmentFlag.AlignVCenter
+        fl.addWidget(self._hotkey_widget(), 0, mid)   # the one hotkey — no tab for a single item
         self.status_lbl = QLabel(""); self.status_lbl.setStyleSheet("color:#56e0c2;font-size:11.5px;font-weight:600;")
-        fl.addWidget(self.status_lbl, 1)
+        self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | mid)
+        fl.addWidget(self.status_lbl, 1, mid)
+        btn_css = ("QPushButton{{background:{bg};color:{fg};font-weight:{w};border:1px solid {bd};"
+                   "border-radius:6px;padding:0 18px;}}QPushButton:hover{{background:{hv};}}")
         close = QPushButton("Close"); close.setCursor(Qt.CursorShape.PointingHandCursor); close.clicked.connect(self.hide)
+        close.setStyleSheet(btn_css.format(bg="transparent", fg="#dce6f7", w=600, bd="#2a3446", hv="#161c28"))
         save = QPushButton("Save && Apply"); save.setCursor(Qt.CursorShape.PointingHandCursor)
-        save.setStyleSheet(
-            "QPushButton{background:#6ba4ff;color:#0c0f14;font-weight:700;border:1px solid #6ba4ff;"
-            "border-radius:6px;padding:6px 18px;min-height:20px;}QPushButton:hover{background:#7db0ff;}")
+        save.setStyleSheet(btn_css.format(bg="#6ba4ff", fg="#0c0f14", w=700, bd="#6ba4ff", hv="#7db0ff"))
         save.clicked.connect(self._save)
-        fl.addWidget(close); fl.addWidget(save)
+        for b in (close, save):
+            b.setFixedHeight(32)
+            fl.addWidget(b, 0, mid)
         root.addWidget(foot)
         self._sidebar.setCurrentRow(0)
 
@@ -652,24 +654,26 @@ class SettingsWindow(QWidget):
     def _page_behavior(self):
         scroll, lay = _page()
         lay.addWidget(_title("Overlay & Audio",
-                             "How the HUD looks and how recording is triggered."))
+                             "How the HUD looks and how listening works."))
 
         oc, ob = _card("Overlay", "appearance & privacy of the HUD window")
         self.opacity = QDoubleSpinBox()
         self.opacity.setRange(0.30, 1.00); self.opacity.setSingleStep(0.05); self.opacity.setDecimals(2)
         ob.addWidget(_row("HUD opacity", self.opacity,
                           "1.00 = solid, lower = more see-through."))
-        self.hide_capture = QCheckBox("Hide HUD from screen recording & screen-share")
-        ob.addWidget(self.hide_capture)
-        hint = QLabel("Stays visible on your screen but is invisible to OBS, Google "
-                      "Meet / Zoom / Teams share, and screenshots (Windows).")
-        hint.setProperty("class", "row_help"); hint.setWordWrap(True); ob.addWidget(hint)
+        # checkbox + wrapping help in a row: a long checkbox label can't wrap and
+        # used to push the page wider than the window (no right padding)
+        self.hide_capture = QCheckBox("Enabled")
+        ob.addWidget(_row("Hide from screen-share", self.hide_capture,
+                          "Stays visible on your screen but is invisible to OBS, Google Meet / "
+                          "Zoom / Teams share, and screenshots (Windows)."))
         lay.addWidget(oc)
 
-        ac, ab = _card("Listening", "manual: ▶ Listen, then Answer / Improve when you want help")
-        self.echo_gate = QCheckBox("Echo gate — mute my mic while the interviewer is talking "
-                                   "(needed on speakers, harmless on headphones)")
-        ab.addWidget(self.echo_gate)
+        ac, ab = _card("Listening", "● Listen on the HUD, then ✦ Answer when you want help")
+        self.echo_gate = QCheckBox("Enabled")
+        ab.addWidget(_row("Echo gate", self.echo_gate,
+                          "Mutes your mic while the interviewer is talking — needed on speakers, "
+                          "harmless on headphones."))
         self.chunk_secs = QSpinBox(); self.chunk_secs.setRange(8, 28); self.chunk_secs.setSuffix(" s")
         ab.addWidget(_row("Background chunk", self.chunk_secs,
                           "While listening, audio is transcribed in chunks this long so Answer only "
@@ -682,28 +686,27 @@ class SettingsWindow(QWidget):
         lay.addWidget(ac); lay.addStretch(1)
         return scroll
 
-    def _page_about(self):
-        scroll, lay = _page()
-        lay.addWidget(_title("Hotkeys",
-                             "Global — work even while the meeting window is focused. Click Change, "
-                             "then press the new combo (Esc cancels)."))
-        card, b = _card("Shortcuts")
+    def _hotkey_widget(self):
+        """Footer, far left: the global show / hide hotkey. Click it, press the
+        new combo (Esc cancels); Save & Apply re-registers it."""
+        w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(8)
+        mid = Qt.AlignmentFlag.AlignVCenter
         self._hk_buttons = {}
         for action, label in HK_ACTIONS:
-            r = QWidget(); h = QHBoxLayout(r); h.setContentsMargins(0, 2, 0, 2); h.setSpacing(10)
-            a = QLabel(label); a.setStyleSheet("font-size:12.5px;font-weight:600;")
+            a = QLabel(label); a.setStyleSheet("color:#8a96aa;font-size:11.5px;")
             btn = QPushButton("—")
+            btn.setToolTip("Global hotkey — works while the meeting window is focused. "
+                           "Click, then press the new combo (Esc cancels).")
             btn.setStyleSheet(
                 "QPushButton{background:#0d1118;border:1px solid #1e2636;border-radius:6px;"
-                "color:#6ba4ff;font-family:Consolas,monospace;font-size:12px;font-weight:700;"
-                "padding:6px 14px;min-width:150px;}QPushButton:hover{border:1px solid #6ba4ff;}")
+                "color:#6ba4ff;font-family:Consolas,monospace;font-size:11.5px;font-weight:700;"
+                "padding:0 10px;}QPushButton:hover{border:1px solid #6ba4ff;}")
+            btn.setFixedHeight(32)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _=False, ac=action: self._start_capture(ac))
             self._hk_buttons[action] = btn
-            h.addWidget(a, 1); h.addWidget(btn)
-            b.addWidget(r)
-        lay.addWidget(card); lay.addStretch(1)
-        return scroll
+            h.addWidget(a, 0, mid); h.addWidget(btn, 0, mid)
+        return w
 
     # ── hotkey capture ─────────────────────────────────────────────────
 
@@ -761,7 +764,7 @@ class SettingsWindow(QWidget):
         self.stt_threads.setValue(int(st.get("cpu_threads") or 0))
         self.stt_lang.setText(st.get("language") or "")
         self.stt_task.setCurrentIndex(max(0, self.stt_task.findData(st.get("task") or "transcribe")))
-        self.stt_beam.setValue(int(st.get("num_beams") or st.get("beam_size") or 1))
+        self.stt_beam.setValue(int(st.get("num_beams") or 1))
         self.stt_temp.setValue(float(st.get("temperature") or 0.0))
         self.stt_rep.setValue(float(st.get("repetition_penalty") or 1.0))
         self.stt_prompt.setText(st.get("initial_prompt") or "")
@@ -792,14 +795,6 @@ class SettingsWindow(QWidget):
             self._prof_model["default"] = {"name": "default", "body":
                 "You are helping me in a live interview. Give concise, speakable answers.",
                 "temp": None, "files": []}
-        # legacy global persona folds into each profile's prompt (one-time),
-        # then it's cleared on save — prompt + persona are one field now.
-        persona = (CFG.get("persona") or "").strip()
-        if persona:
-            for m in self._prof_model.values():
-                body = (m.get("body") or "").rstrip()
-                m["body"] = f"{body}\n\n{persona}".strip() if body else persona
-
         want = CFG.get("profile", "")
         if want not in self._prof_model:
             want = next(iter(self._prof_model))
@@ -830,15 +825,11 @@ class SettingsWindow(QWidget):
             profiles_mod.save_profile(pid, m.get("name") or pid, m.get("body") or "", meta)
             profiles_mod.set_context_files(pid, m.get("files") or [])
         cfg["profile"] = self.profile.currentData() or self._cur_pid
-        cfg["persona"] = ""          # merged into each profile's prompt
-        cfg.pop("vars", None)
         cfg["hotkeys"] = dict(self._hotkey_edits)
         cfg["overlay"] = {**(CFG.get("overlay", {}) or {}),
                           "opacity": round(self.opacity.value(), 2),
                           "exclude_from_capture": self.hide_capture.isChecked()}
-        # drop the faster-whisper-era keys (compute_type / beam_size)
-        st_old = {k: v for k, v in (CFG.get("stt", {}) or {}).items()
-                  if k not in ("compute_type", "beam_size")}
+        st_old = CFG.get("stt", {}) or {}
         cfg["stt"] = {**st_old,
                       "engine": self.stt_engine.currentData() or "auto",
                       "voxtype_url": self.stt_vox_url.text().strip() or "http://127.0.0.1:6600",

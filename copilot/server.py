@@ -98,13 +98,11 @@ class Copilot:
         self.listeners: list = []            # in-process subscribers (overlay)
         self.levels_me = deque(maxlen=18)    # live mic level (you)
         self.levels_int = deque(maxlen=18)   # live loopback level (interviewer)
-        self.levels = self.levels_me         # back-compat alias
 
         self.profiles = profiles_mod.list_profiles()
         cfg_prof = CFG.get("profile")
         self.active_profile = cfg_prof if cfg_prof in self.profiles else next(iter(self.profiles), None)
         self.chain = ProviderChain(CFG.get("llm", {}))
-        self.stt = None
         self._stt_error = None      # why STT failed to init, if it did
         self.audio = None
         self._read_audio_cfg()
@@ -261,10 +259,9 @@ class Copilot:
             # model hands both channels the same shared instance (one copy in RAM)
             self.stt_int = make_stt(stt_cfg, self.status)
             self.stt_me = make_stt(stt_cfg)
-            self.stt = self.stt_me     # back-compat alias
             self._stt_error = None
         except Exception as e:
-            self.stt = self.stt_int = self.stt_me = None
+            self.stt_int = self.stt_me = None
             self._stt_error = str(e)
             self.status(f"Speech engine unavailable: {e}", "error")
             return
@@ -427,7 +424,7 @@ class Copilot:
         local = dict(cfg, engine="local")
         try:
             self.stt_int = make_stt(local, self.status)
-            self.stt_me = self.stt = make_stt(local)
+            self.stt_me = make_stt(local)
             self._stt_error = None
             # we're now running something other than what `stt` asks for, so let
             # the next Save & Apply re-select (picks VoxType up again if it's back)
@@ -565,15 +562,12 @@ class Copilot:
         self.profiles = profiles_mod.list_profiles()  # pick up prompt edits live
         prof = self.profiles.get(self.active_profile)
         if prof:
-            system = profiles_mod.render(prof, CFG.get("vars", {}))
+            system = profiles_mod.render(prof)
             system += profiles_mod.context_block(self.active_profile)
             temp = (prof.get("meta") or {}).get("temperature")
         else:
             system = "You are a real-time interview assistant. Give concise, speakable answers."
             temp = None
-        persona = (CFG.get("persona") or "").strip()
-        if persona:
-            system += "\n\n--- RESPONSE STYLE (persona) ---\n" + persona
         return system, temp
 
     def _answer(self, qid: int, user: str, convo: str, mode: str, cancel: threading.Event):

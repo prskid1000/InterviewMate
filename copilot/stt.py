@@ -10,21 +10,13 @@ Two engines matter in practice (picked by `stt.engine` in config.yaml):
 
 `engine: auto` (the default) probes VoxType and only spins up the local GPU
 model when VoxType isn't there. See `make_stt`.
-
-The user-defined cloud provider chain below (openai / gemini api types) is kept
-for reference and is not offered in the UI.
 """
-import base64
 import io
 import os
 import threading
 import wave
 
 import numpy as np
-
-
-def _resolve_key(entry: dict) -> str:
-    return (entry.get("api_key") or os.getenv(entry.get("api_key_env", "") or "") or "").strip()
 
 
 def _wav_bytes(audio: np.ndarray) -> bytes:
@@ -64,8 +56,8 @@ class LocalSTT:
 
     # Whisper's encoder is hard-wired to a 30 s receptive field: the feature
     # extractor pads OR TRUNCATES every input to 3000 mel frames, so a plain
-    # generate() silently drops everything past 30 s. Longer audio (we record
-    # up to audio.max_record_seconds) must take the sequential long-form path.
+    # generate() silently drops everything past 30 s. Longer audio (a chunk is
+    # ≤ 28 s, but typed/odd callers may send more) takes the long-form path.
     _WINDOW_SEC = 30.0
 
     def __init__(self, model="openai/whisper-large-v3", language="en", device="cuda",
@@ -277,115 +269,6 @@ class VoxTypeSTT:
         return r.text.strip()
 
 
-class OpenAISTT:
-    def __init__(self, base_url, api_key, model, language="en"):
-        from openai import OpenAI
-        self.client = OpenAI(base_url=base_url, api_key=api_key or "none")
-        self.model = model
-        self.language = language or None
-
-    def transcribe(self, audio: np.ndarray) -> str:
-        kwargs = {"model": self.model,
-                  "file": ("utterance.wav", io.BytesIO(_wav_bytes(audio)))}
-        if self.language:
-            kwargs["language"] = self.language
-        r = self.client.audio.transcriptions.create(**kwargs)
-        return (r.text or "").strip()
-
-
-class GeminiSTT:
-    def __init__(self, base_url, api_key, model, language="en"):
-        import httpx
-        if not api_key:
-            raise RuntimeError("Gemini needs an API key — add it in Settings → STT (or set GEMINI_API_KEY in .env)")
-        self.base = (base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
-        self.key = api_key
-        self.model = model or "gemini-2.5-flash-lite"
-        self.language = language or "en"
-        self.http = httpx.Client(timeout=60)
-
-    def transcribe(self, audio: np.ndarray) -> str:
-        b64 = base64.b64encode(_wav_bytes(audio)).decode()
-        prompt = (f"Transcribe this audio verbatim (language: {self.language}). "
-                  "Return ONLY the spoken words with punctuation — no commentary.")
-        r = self.http.post(
-            f"{self.base}/models/{self.model}:generateContent",
-            params={"key": self.key},
-            json={"contents": [{"parts": [
-                {"inline_data": {"mime_type": "audio/wav", "data": b64}},
-                {"text": prompt}]}],
-                "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}},
-        )
-        if r.status_code != 200:
-            # surface Gemini's real reason (invalid key / model / payload)
-            try:
-                msg = r.json().get("error", {}).get("message", "") or r.text
-            except Exception:
-                msg = r.text
-            raise RuntimeError(f"HTTP {r.status_code} — {msg.strip()[:300]}")
-        data = r.json()
-        try:
-            parts = data["candidates"][0]["content"]["parts"]
-        except (KeyError, IndexError):
-            return ""
-        return " ".join(p.get("text", "") for p in parts).strip()
-
-
-class SttChain:
-    """Tries enabled STT providers in order; first non-empty result wins.
-    Backends are built lazily so a heavy local model only loads if reached."""
-
-    def __init__(self, providers: list[dict], language="en"):
-        self._specs = []
-        for p in providers:
-            if not p.get("enabled", True):
-                continue
-            self._specs.append({
-                "name": (p.get("name") or p.get("api_type") or "stt").strip(),
-                "api_type": (p.get("api_type") or "local").strip(),
-                "base_url": (p.get("base_url") or "").strip(),
-                "key": _resolve_key(p),
-                "model": (p.get("model") or "").strip(),
-                "backend": None,
-            })
-        self.language = language
-        self.device = self._specs[0]["name"] if self._specs else "none"
-
-    def _build(self, spec):
-        t = spec["api_type"]
-        base = spec["base_url"]
-        # Gemini has no OpenAI-style /audio/transcriptions endpoint — always use
-        # the native generateContent path, whatever api_type was picked. This
-        # prevents a 404 when a Gemini base is added as an "openai" provider.
-        if "generativelanguage.googleapis" in base:
-            native = base.split("/openai")[0].rstrip("/")   # .../v1beta/openai/ -> .../v1beta
-            return GeminiSTT(native, spec["key"], spec["model"] or "gemini-2.5-flash-lite",
-                             language=self.language)
-        if t == "local":
-            return LocalSTT(model=spec["model"] or "base", language=self.language)
-        if t == "openai":
-            return OpenAISTT(spec["base_url"], spec["key"], spec["model"] or "whisper-large-v3-turbo",
-                             language=self.language)
-        if t == "gemini":
-            return GeminiSTT(spec["base_url"], spec["key"], spec["model"] or "gemini-2.5-flash-lite",
-                             language=self.language)
-        raise RuntimeError(f"unknown STT api_type: {t}")
-
-    def transcribe(self, audio: np.ndarray) -> str:
-        if not self._specs:
-            raise RuntimeError("No speech-to-text provider configured (Settings → Speech-to-text).")
-        errors = []
-        for spec in self._specs:
-            try:
-                if spec["backend"] is None:
-                    spec["backend"] = self._build(spec)
-                    self.device = getattr(spec["backend"], "device", spec["name"])
-                return spec["backend"].transcribe(audio)
-            except Exception as ex:
-                errors.append(f"{spec['name']}: {str(ex)[:300]}")
-        raise RuntimeError("All STT providers failed — " + "; ".join(errors))
-
-
 def make_stt(cfg: dict, on_status=None):
     """Build one channel's STT backend from the `stt` config block.
 
@@ -415,7 +298,7 @@ def make_stt(cfg: dict, on_status=None):
 
 
 def _local_cfg(cfg: dict) -> dict:
-    """The `stt` block -> LocalSTT kwargs (defaults + legacy beam_size)."""
+    """The `stt` block -> LocalSTT kwargs (with defaults)."""
     return {
         "model": cfg.get("model") or "openai/whisper-large-v3",
         "language": cfg.get("language", "en"),
@@ -426,7 +309,7 @@ def _local_cfg(cfg: dict) -> dict:
         "warmup": bool(cfg.get("warmup", True)),
         "cpu_threads": int(cfg.get("cpu_threads") or 0),
         "task": cfg.get("task") or "transcribe",
-        "num_beams": int(cfg.get("num_beams") or cfg.get("beam_size") or 1),
+        "num_beams": int(cfg.get("num_beams") or 1),
         "temperature": float(cfg.get("temperature") or 0.0),
         "repetition_penalty": float(cfg.get("repetition_penalty") or 1.0),
         "initial_prompt": cfg.get("initial_prompt") or "",

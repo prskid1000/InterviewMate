@@ -30,17 +30,16 @@ python -m venv .venv
 | File | Responsibility |
 |------|----------------|
 | `main.py` | Entry point. Starts uvicorn in a thread, builds the Qt app, HUD, settings window, and the global-hotkey listener — only `toggle_hud` (`build_hotkeys()` re-registers on rebind). |
-| `server.py` | `Copilot` core + FastAPI. Multiple **sessions** (tabs) — `transcript`/`exchanges` are properties proxying the active session; `new_/switch_/close_session` post `sessions`/`session_activated` events. The manual flow (see "Listening / turns" below), prompt assembly (profile + per-profile context block + persona + history), the answer stream, and the `/ws` websocket. `apply_settings()` hot-reloads config and rebuilds STT off-thread only if the `stt` block actually changed. The two `_stt_worker` threads start **once** (`_start_stt_workers`) and re-read `stt_int`/`stt_me` per chunk, so engines can be swapped under them — that's what `_maybe_failover` does when VoxType dies mid-session under `engine: auto`. |
+| `server.py` | `Copilot` core + FastAPI. Multiple **sessions** (tabs) — `transcript`/`exchanges` are properties proxying the active session; `new_/switch_/close_session` post `sessions`/`session_activated` events. The manual flow (see "Listening / turns" below), prompt assembly (profile + per-profile context block + history), the answer stream, and the `/ws` websocket. `apply_settings()` hot-reloads config and rebuilds STT off-thread only if the `stt` block actually changed. The two `_stt_worker` threads start **once** (`_start_stt_workers`) and re-read `stt_int`/`stt_me` per chunk, so engines can be swapped under them — that's what `_maybe_failover` does when VoxType dies mid-session under `engine: auto`. |
 | `overlay.py` | ONE merged, all-edge-resizable window: `Hud` paints the top BAR (status glyph + two vertical-bar equalizer meters + three icon buttons at the right: listen ● / ■, answer ✦ / ✕ cancel while answering (amber dot = chunks still transcribing), settings gear). The BAR has no child widgets — the icons are painted glyphs with click zones (`_icon_rect` / `_icon_at`, tested in `mouseReleaseEvent`), driven by the `state` event. `SessionTabs` + `AnswerView` (the streamed answer) sit below it. Capture-hidden + opacity from `overlay.*`; geometry/visibility/collapse persisted. Subscribes to `Copilot.listeners` via a Qt `Signal`. |
 | `settings_ui.py` | Native `SettingsWindow` (sidebar + pages — `SECTIONS` order must match the builder tuple in `_build`), `ProviderEditor` (the custom-provider list, now used by AI Model only), the **Speech** page (`_page_speech`: engine combo + VoxType URL/Test + built-in model), hotkey capture. |
 | `llm.py` | `ProviderChain` — user-defined chat providers. Supports `openai` (OpenAI SDK, streaming) and `anthropic` (Anthropic SDK, `messages.stream`). No hardcoded providers. Entries on a local host are flagged `local` → TCP-preflighted by `local_endpoint_up()` and skipped fast when dark, and their clients get `timeout=90, max_retries=0`. |
-| `stt.py` | `make_stt(cfg, on_status)` picks the engine from `stt.engine`: **`voxtype`** (`VoxTypeSTT` → VoxType's embedded OpenAI server, default `127.0.0.1:6600`) or **`local`** (`LocalSTT`, a port of VoxType's transformers `_WhisperHandler` — same HF cache and knobs, large-v3 on CUDA fp16, CPU fp32 fallback; long-form path for >30 s; both channels share one instance via `_shared_local`). `auto` = VoxType if `voxtype_probe()` says it's up, else local. Prefer VoxType — its Whisper is already resident on the GPU, so we skip a second copy in VRAM and the startup load. `SttChain` + the cloud `openai`/`gemini` classes are legacy, not offered in the UI. |
+| `stt.py` | `make_stt(cfg, on_status)` picks the engine from `stt.engine`: **`voxtype`** (`VoxTypeSTT` → VoxType's embedded OpenAI server, default `127.0.0.1:6600`) or **`local`** (`LocalSTT`, a port of VoxType's transformers `_WhisperHandler` — same HF cache and knobs, large-v3 on CUDA fp16, CPU fp32 fallback; long-form path for >30 s; both channels share one instance via `_shared_local`). `auto` = VoxType if `voxtype_probe()` says it's up, else local. Prefer VoxType — its Whisper is already resident on the GPU, so we skip a second copy in VRAM and the startup load. |
 | `audio.py` | `AudioEngine` — PyAudioWPatch capture. `candidate` = default mic, `interviewer` = default WASAPI loopback. Resamples to 16 kHz mono float32. |
 | `profiles.py` | CRUD for `profiles/*.md` (YAML frontmatter + body): `save_profile`/`delete_profile`. Each profile has its own **context files** in `context/<id>/` (`list_/set_context_files`), injected via `context_block()` and available as `{{title}}` template vars. Loose files at the top of `context/` remain shared vars. |
 | `config.py` | `load_config()` / `save_config()` over `config.yaml`; `CFG` is the shared live dict. |
 | `qt_theme_local.py` | Dark QSS for the settings window. |
 | `uikit.py` | `ResizableMixin` (all-edge frameless resize) + `load_state`/`save_state` (`overlay_state.json`). |
-| `vad.py` | Legacy energy VAD from the auto-segment era. **Unused** (recording is manual). Safe to delete. |
 
 ## Provider model (important)
 
@@ -104,17 +103,17 @@ trip on localhost is ~0.4 s for a 4 s utterance.
   handling (audio > 30 s needs `truncation=False` + `padding="longest"` +
   attention mask + `return_timestamps=True` and **no** `max_new_tokens`, or the
   tail is silently dropped). Old faster-whisper names (`large-v3`, `small.en`)
-  map to `openai/whisper-*`; legacy `beam_size` is read as `num_beams`.
+  map to `openai/whisper-*`.
 - torch is installed from the CUDA wheel index in `setup.ps1` (cu132, as in
   VoxType); requirements.txt's bare `torch` would be a CPU build.
 
 ## Prompt assembly (`server._answer`)
 
-`system = render(active_profile, vars)` + persona (`config.persona`) appended as
-a "RESPONSE STYLE" block. Then the last `history_exchanges` Q/A pairs, then the
-current turn (question + the user's spoken attempt). History makes deep
-follow-ups coherent; the persona controls tone/format/length/language on top of
-whatever profile is active.
+`system = render(active_profile)` (the profile's prompt with `{{title}}` context
+files filled in) + its context block. Then the last `history_exchanges` turn →
+suggestion pairs, then the current turn. History makes deep follow-ups coherent.
+Tone/format/length/language belong in the profile prompt — the old global
+`persona` and `vars` keys are gone (no fallback).
 
 ## Listening / turns (`server.py`)
 

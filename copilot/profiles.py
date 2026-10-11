@@ -1,5 +1,5 @@
 """Prompt profiles: markdown files in profiles/ with YAML frontmatter.
-Template variables {{name}} come from config.yaml `vars:` plus files in
+Template variables {{name}} come from files in
 context/ (context/resume.md -> {{resume}})."""
 import re
 from pathlib import Path

@@ -52,7 +52,6 @@ DEFAULT_CONFIG = {
         "disable_thinking": True, "thinking_tokens": 0,
     },
     "profile": "Interview",
-    "persona": "",
     "server": {"host": "127.0.0.1", "port": 8765},
 }
 
