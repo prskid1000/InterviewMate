@@ -4,11 +4,11 @@ A single frameless, capture-hidden window that stacks:
   • the top BAR — status glyph + both live level meters (INTERVIEWER / YOU)
   • the answer area — streams the AI answer as one continuous session
 
-Drag the bar to move; click the left status zone to record; click the gear at
-the right of the bar for settings; right-click for the menu; resize from any
-edge/corner. The answer area can be collapsed
-(toggle_answer hotkey). Position, size, visibility and collapsed state all
-persist across restarts.
+Drag the bar to move; the button row under it drives everything (▶ Listen /
+■ Stop, Answer, Improve, ✕ cancel); the gear at the right of the bar opens
+settings; right-click for the menu; resize from any edge/corner. The only
+hotkey shows / hides the whole overlay. Position, size, visibility and
+collapsed state all persist across restarts.
 """
 from __future__ import annotations
 
@@ -321,6 +321,64 @@ class SessionTabs(QWidget):
         self._lay.addStretch(1)
 
 
+class Controls(QWidget):
+    """The button row under the meter bar: ▶ Listen / ■ Stop, Answer, Improve,
+    Cancel, plus a small note (chunks still transcribing). Always visible, even
+    with the answer panel collapsed."""
+
+    H = 36
+    _BTN = ("QPushButton{{background:{bg};color:{fg};border:1px solid {bd};border-radius:7px;"
+            "padding:3px 10px;font:600 11px 'Segoe UI';}}"
+            "QPushButton:hover:enabled{{border:1px solid {hv};}}"
+            "QPushButton:disabled{{color:#4a5468;border:1px solid #1c2330;}}")
+
+    def __init__(self, co):
+        super().__init__()
+        self.co = co
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedHeight(self.H)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 4, 12, 4)
+        lay.setSpacing(6)
+
+        def btn(text, tip, slot):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.clicked.connect(slot)
+            lay.addWidget(b)
+            return b
+
+        self.listen = btn("▶ Listen", "Start / stop capturing the interviewer + your mic",
+                          co.toggle_listening)
+        self.answer = btn("Answer", "Send everything since the last answer and get what to say",
+                          co.ask_now)
+        self.improve = btn("Improve", "Improve what you said since the last answer", co.improve)
+        self.cancel = btn("✕", "Cancel the answer", co.cancel)
+        self.note = QLabel("")
+        self.note.setStyleSheet("color:#7c8aa5; font:11px 'Segoe UI'; background:transparent;")
+        lay.addWidget(self.note, 1)
+        self.set_state(False, False, 0)
+
+    def set_state(self, listening: bool, answering: bool, pending: int):
+        if listening:
+            self.listen.setText("■ Stop")
+            self.listen.setStyleSheet(self._BTN.format(bg="rgba(239,68,68,0.16)", fg="#fca5a5",
+                                                       bd="#7f2d2d", hv="#f87171"))
+        else:
+            self.listen.setText("▶ Listen")
+            self.listen.setStyleSheet(self._BTN.format(bg="rgba(52,201,142,0.12)", fg="#6ee7b7",
+                                                       bd="#1f5c45", hv="#34d89e"))
+        plain = self._BTN.format(bg="rgba(255,255,255,0.04)", fg="#dce6f7", bd="#2a3446", hv="#6ba4ff")
+        self.answer.setStyleSheet(self._BTN.format(bg="rgba(107,164,255,0.16)", fg="#cfe0ff",
+                                                   bd="#36507e", hv="#6ba4ff"))
+        self.improve.setStyleSheet(plain)
+        self.cancel.setStyleSheet(plain)
+        self.cancel.setEnabled(answering)
+        self.note.setText(f"transcribing {pending}…" if pending else "")
+
+
 class Hud(ResizableMixin, QWidget):
     """The single overlay window: status glyph + dual meters in a top BAR,
     with the streaming answer area stacked beneath it."""
@@ -341,7 +399,7 @@ class Hud(ResizableMixin, QWidget):
         self.setWindowFlags(_OVERLAY_FLAGS)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        self.init_resize(min_w=self.MIN_W, min_h=self.BAR_H)
+        self.init_resize(min_w=self.MIN_W, min_h=self.BAR_H + Controls.H)
 
         st = load_state()
         self._state = "idle"
@@ -354,11 +412,13 @@ class Hud(ResizableMixin, QWidget):
         self._answer_expanded = bool(st.get("answer_expanded", True))
 
         # tabs + answer area live below the bar; the layout reserves the strip
+        self.controls = Controls(co)
         self.tabs = SessionTabs(self._switch_session, self._new_session, self._close_session)
         self.answer = AnswerView()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(1, self.BAR_H, 1, 1)
         lay.setSpacing(0)
+        lay.addWidget(self.controls)
         lay.addWidget(self.tabs)
         lay.addWidget(self.answer)
         self.tabs.setVisible(self._answer_expanded)
@@ -366,7 +426,7 @@ class Hud(ResizableMixin, QWidget):
         self.tabs.render(co.sessions_meta(), co.active)
 
         w = int(st.get("hud_w", 360))
-        h = int(st.get("hud_h", self.DEFAULT_H)) if self._answer_expanded else self.BAR_H
+        h = int(st.get("hud_h", self.DEFAULT_H)) if self._answer_expanded else self._collapsed_h()
         self.resize(w, h)
 
         self.event_sig.connect(self._on_event)
@@ -382,6 +442,9 @@ class Hud(ResizableMixin, QWidget):
         self._apply_overlay_cfg()
         if bool(st.get("hud_visible", True)):
             self.show()
+
+    def _collapsed_h(self) -> int:
+        return self.BAR_H + Controls.H + 2
 
     def _apply_overlay_cfg(self):
         """Opacity + capture-exclusion from config (called at start and after
@@ -402,6 +465,12 @@ class Hud(ResizableMixin, QWidget):
             # live transcription line (interviewer / me) → a chat bubble
             self._set_answer_expanded(True)
             self.answer.add_message(m.get("speaker", ""), m.get("text", ""))
+        elif t == "state":
+            self._listening = bool(m.get("listening"))
+            self._answering = bool(m.get("answering"))
+            self.controls.set_state(self._listening, self._answering, int(m.get("pending", 0)))
+            if self._state != "error":
+                self._set(self._idle_state())
         elif t == "answer_start":
             self._set("answering")
             self._set_answer_expanded(True)        # an answer forces the panel open
@@ -412,12 +481,9 @@ class Hud(ResizableMixin, QWidget):
             self.answer.add(m.get("text", ""), m.get("provider"))
         elif t == "answer_done":
             self.answer.finish()
-            self._set("idle")
         elif t == "answer_error":
             self.answer.error(m.get("text", ""))
             self._flash_error()
-        elif t == "pipeline_idle":
-            self._set("idle")
         elif t == "sessions":
             self.tabs.render(m.get("list", []), m.get("active", 0))
         elif t == "session_activated":
@@ -431,9 +497,15 @@ class Hud(ResizableMixin, QWidget):
                 self._set_answer_expanded(True)   # make the error visible
                 self._flash_error()
 
+    def _idle_state(self) -> str:
+        """Glyph when nothing is flashing: answering > listening > idle."""
+        if getattr(self, "_answering", False):
+            return "answering"
+        return "recording" if getattr(self, "_listening", False) else "idle"
+
     def _flash_error(self):
         self._set("error")
-        QTimer.singleShot(2500, lambda: self._set("idle") if self._state == "error" else None)
+        QTimer.singleShot(2500, lambda: self._set(self._idle_state()) if self._state == "error" else None)
 
     def _on_ui(self, cmd: str):
         if cmd == "toggle_answer":
@@ -442,8 +514,6 @@ class Hud(ResizableMixin, QWidget):
             self._toggle_hud()
         elif cmd == "toggle_settings" and self.settings is not None:
             self.settings.toggle()
-        elif cmd == "toggle_record":
-            self._toggle_recording()
 
     def _toggle_hud(self):
         if self.isVisible():
@@ -464,9 +534,6 @@ class Hud(ResizableMixin, QWidget):
     def toggle_settings_threadsafe(self):
         self.ui_sig.emit("toggle_settings")
 
-    def toggle_record_threadsafe(self):
-        self.ui_sig.emit("toggle_record")
-
     # answer collapse/expand -------------------------------------------
 
     def _set_answer_expanded(self, on: bool):
@@ -477,9 +544,9 @@ class Hud(ResizableMixin, QWidget):
         self.answer.setVisible(on)
         if on:
             h = int(load_state().get("hud_h", self.DEFAULT_H))
-            self.resize(self.width(), max(h, self.BAR_H + 60))
+            self.resize(self.width(), max(h, self._collapsed_h() + 60))
         else:
-            self.resize(self.width(), self.BAR_H)
+            self.resize(self.width(), self._collapsed_h())
         save_state(answer_expanded=on)
 
     def _toggle_answer(self):
@@ -571,8 +638,6 @@ class Hud(ResizableMixin, QWidget):
             if not self._moved and e.button() == Qt.MouseButton.LeftButton:
                 if self._gear_rect().contains(QPointF(px, py)):
                     self._open_settings()        # gear at the right of the BAR
-                elif px < 52 and py < self.BAR_H:
-                    self._toggle_recording()     # left status zone = ask now
         self._drag = None
 
     def contextMenuEvent(self, e):
@@ -583,8 +648,10 @@ class Hud(ResizableMixin, QWidget):
             "QMenu::item{padding:7px 22px 7px 12px;border-radius:5px;margin:1px 2px;}"
             "QMenu::item:selected{background:#1a2030;}"
             "QMenu::separator{height:1px;background:#1e2636;margin:4px 6px;}")
-        rec = menu.addAction("Ask AI now")
-        rec.triggered.connect(self._toggle_recording)
+        lis = menu.addAction("Stop listening" if getattr(self, "_listening", False) else "Listen")
+        lis.triggered.connect(self.co.toggle_listening)
+        menu.addAction("Answer").triggered.connect(self.co.ask_now)
+        menu.addAction("Improve my answer").triggered.connect(self.co.improve)
         ans = menu.addAction("Collapse answer" if self._answer_expanded else "Expand answer")
         ans.triggered.connect(self._toggle_answer)
         menu.addSeparator()
@@ -598,11 +665,6 @@ class Hud(ResizableMixin, QWidget):
         q = menu.addAction("Quit Interview Copilot")
         q.triggered.connect(lambda: __import__("os")._exit(0))
         menu.exec(e.globalPos())
-
-    def _toggle_recording(self):
-        # continuous listening never stops — the hotkey/click just sends the
-        # current turn (interviewer question + my response) to the LLM.
-        self.co.ask_now()
 
     def _open_settings(self):
         """Gear click, context menu, and the open_config hotkey all land here.
@@ -638,9 +700,10 @@ class Hud(ResizableMixin, QWidget):
         self._draw_gear(p, self._gear_rect())
 
         # divider between the bar and the answer area (only when expanded)
-        if self._answer_expanded and H > B + 2:
-            p.setPen(QPen(QColor(255, 255, 255, 16), 1.0))
-            p.drawLine(12, B, W - 12, B)
+        p.setPen(QPen(QColor(255, 255, 255, 16), 1.0))
+        p.drawLine(12, B, W - 12, B)
+        if self._answer_expanded and H > B + Controls.H + 2:
+            p.drawLine(12, B + Controls.H, W - 12, B + Controls.H)
         p.end()
 
     # ── settings gear ──

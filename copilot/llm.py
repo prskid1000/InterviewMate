@@ -95,14 +95,17 @@ class ProviderChain:
             e["client"] = OpenAI(base_url=e["base_url"], api_key=e["key"] or "none", **kw)
         return e["client"]
 
-    def stream(self, messages, temperature=None):
-        """Yields (provider_name, text_delta)."""
+    def stream(self, messages, temperature=None, max_tokens=None):
+        """Yields (provider_name, text_delta). Closing this generator (cancel)
+        closes the provider's HTTP stream, so a local model stops generating
+        instead of finishing an answer nobody reads."""
         if not self.entries:
             raise RuntimeError(
                 "No AI provider configured. Open Settings → AI Model and add a "
                 "provider (base URL + model + key)."
             )
         temp = self.temperature if temperature is None else float(temperature)
+        limit = int(max_tokens or self.max_tokens)
         errors = []
         for e in self.entries:
             if time.time() < self.cooldown.get(e["name"], 0):
@@ -113,12 +116,15 @@ class ProviderChain:
                 continue
             yielded = False
             try:
-                gen = (self._stream_anthropic(e, messages, temp)
+                gen = (self._stream_anthropic(e, messages, temp, limit)
                        if e["api_type"] == "anthropic"
-                       else self._stream_openai(e, messages, temp))
-                for tok in gen:
-                    yielded = True
-                    yield e["name"], tok
+                       else self._stream_openai(e, messages, temp, limit))
+                try:
+                    for tok in gen:
+                        yielded = True
+                        yield e["name"], tok
+                finally:
+                    gen.close()
                 if yielded:
                     return
                 errors.append(f"{e['name']}: returned an empty response")
@@ -146,9 +152,9 @@ class ProviderChain:
             return None
         return "low" if t < 2048 else "medium" if t < 8192 else "high"
 
-    def _stream_openai(self, e, messages, temp):
+    def _stream_openai(self, e, messages, temp, max_tokens):
         kwargs = dict(model=e["model"], messages=messages, stream=True,
-                      max_tokens=self.max_tokens, temperature=temp)
+                      max_tokens=max_tokens, temperature=temp)
         eff = self._reasoning_effort()
         try:
             resp = self._client(e).chat.completions.create(
@@ -158,20 +164,23 @@ class ProviderChain:
                 raise
             # provider doesn't accept reasoning_effort — retry without it
             resp = self._client(e).chat.completions.create(**kwargs)
-        for chunk in resp:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if delta and delta.content:
-                yield delta.content
+        try:
+            for chunk in resp:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta and delta.content:
+                    yield delta.content
+        finally:
+            resp.close()                 # cancel → drop the HTTP stream
 
-    def _stream_anthropic(self, e, messages, temp):
+    def _stream_anthropic(self, e, messages, temp, max_tokens):
         system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
         conv = [{"role": m["role"], "content": m["content"]}
                 for m in messages if m["role"] in ("user", "assistant")]
         # anthropic SDK 1.x dropped `temperature` from the signature; send it raw
         # (llama.cpp-backed proxies still honor it).
-        kwargs: dict = dict(model=e["model"], max_tokens=self.max_tokens, messages=conv,
+        kwargs: dict = dict(model=e["model"], max_tokens=max_tokens, messages=conv,
                       extra_body={"temperature": temp})
         if system:
             kwargs["system"] = system
@@ -179,7 +188,7 @@ class ProviderChain:
         # max_tokens > budget and temperature = 1 while thinking).
         if not self.disable_thinking and self.thinking_tokens > 0:
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": self.thinking_tokens}
-            kwargs["max_tokens"] = max(self.max_tokens, self.thinking_tokens + 512)
+            kwargs["max_tokens"] = max(max_tokens, self.thinking_tokens + 512)
             kwargs["extra_body"]["temperature"] = 1.0
         with self._client(e).messages.stream(**kwargs) as stream:
             for text in stream.text_stream:

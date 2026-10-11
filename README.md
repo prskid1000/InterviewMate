@@ -8,9 +8,9 @@ follow-up grilling.
 
 It runs as a lightweight desktop **overlay with no system-tray icon**: a small
 draggable HUD with live audio meters, a separate answer panel, and a settings
-window summoned by a hotkey. Everything runs on **free AI providers** by
-default (bring your own free API key); paid providers can be added as custom
-endpoints.
+window. You drive it with buttons on the HUD; the only hotkey shows / hides
+it. By default answers come from a local model via Telecode; free cloud
+providers and paid ones can be added as custom endpoints.
 
 > Use it to genuinely prepare — replay recordings, practice out loud, and learn
 > the model answers. Feeding yourself answers during a live interview without the
@@ -23,10 +23,15 @@ endpoints.
 - **Dual-channel capture** — interviewer (WASAPI system-audio loopback) and you
   (microphone) on separate channels, so speakers are labelled perfectly without
   AI diarization. Works with Google Meet, Zoom, Teams, anything.
-- **Manual recording** — click the HUD or press a hotkey to start/stop. No
-  always-on listening.
-- **Merged HUD** — one bar showing the status indicator plus **live signal
-  meters** for both INTERVIEWER and YOU, so you can confirm both are heard.
+- **Manual, button-driven** — ▶ Listen / ■ Stop opens and closes both
+  devices; **Answer** and **Improve** send when *you* decide; ✕ cancels.
+  Nothing is sent to the AI on its own.
+- **Fast Answer** — while you listen, audio is transcribed in the background in
+  ~20 s chunks, so pressing Answer only waits for the last few seconds.
+- **Works on speakers** — an echo gate mutes your mic while the interviewer
+  talks, and "you" lines that just repeat the interviewer are dropped.
+- **Merged HUD** — a bar with the status indicator and **live signal meters**
+  for INTERVIEWER and YOU, the button row, and the answer panel.
 - **Continuous session** — the answer panel accumulates the whole Q&A as one
   scrolling conversation; the AI keeps full history so deep follow-ups
   ("why?", "go deeper", "what's the trade-off?") stay consistent.
@@ -40,7 +45,7 @@ endpoints.
   every answer (ships tuned for concise, natural, speakable answers).
 - **Profiles** — technical / behavioral / system-design prompt templates, or add
   your own; switchable mid-interview.
-- **Configurable global hotkeys** — rebind any shortcut from the settings window.
+- **One hotkey** — show / hide the overlay (rebindable in Settings → Hotkeys).
 - **Local-first** — the default provider is the local Telecode (llama.cpp)
   proxy; free cloud tiers (Gemini, Groq, OpenRouter) are one click away as presets.
 
@@ -77,37 +82,36 @@ run.bat
 ```
 
 The overlay appears at the bottom-center of your screen. There is **no tray
-icon** — the controls are the **⚙ gear at the right of the HUD bar** (opens
-settings), the HUD's right-click menu, and the global hotkeys.
+icon** — the controls are the HUD's button row, the **⚙ gear at the right of
+the bar** (settings), and the right-click menu (also Quit).
 
 ---
 
 ## Using it
 
-| Hotkey (default) | Action |
-|------------------|--------|
-| `Ctrl + Space`   | Start / stop recording |
-| `Ctrl + Alt + C` | Open / close settings |
-| `Ctrl + Alt + H` | Show / hide the answer panel |
-| `Ctrl + Alt + B` | Show / hide the HUD |
-| `Ctrl + Alt + Q` | Quit |
+| Button | Action |
+|--------|--------|
+| **▶ Listen / ■ Stop** | Open / close the mic and system-audio capture |
+| **Answer** | Send everything said since the last answer (interviewer + you, in order) and stream what to say |
+| **Improve** | Same, but improve what *you* said |
+| **✕** | Cancel the answer in progress |
 
-All hotkeys are rebindable in **Settings → Hotkeys** (click a shortcut, press
-the new combo).
+The only hotkey, `Ctrl + Alt + B` (rebindable in **Settings → Hotkeys**), shows /
+hides the overlay.
 
-1. When the interviewer starts asking, press **Ctrl + Space** (or click the HUD
-   status dot). Both channels start buffering; the meters move.
-2. Answer if you want — your mic is captured separately.
-3. Press **Ctrl + Space** again. Both channels are transcribed and the AI streams
-   a suggested answer into the panel.
-4. For a follow-up, just record again — the AI remembers the whole session.
+1. Press **▶ Listen** before the interview starts (it also wakes a local model
+   up, so the first answer isn't slow). Both meters move.
+2. When you want help, press **Answer**. Lines appear in the panel as they're
+   transcribed; the answer streams in. Listening carries on.
+3. If you started answering yourself, **Improve** polishes what you said.
+4. Follow-ups: just press Answer again — the AI keeps the whole session.
 
 No audio device? Open the browser view at `http://127.0.0.1:8765` and type
 questions manually.
 
 ---
 
-## Settings (Ctrl + Alt + C)
+## Settings (⚙ on the HUD)
 
 - **Speech** — which engine transcribes. Both are offline, no key:
   - **Auto** (default) — use VoxType if its OpenAI HTTP server is up on
@@ -134,7 +138,9 @@ questions manually.
   and the next provider answers.
 - **Interview** — active profile, role/subject, the **Persona** box (how it
   responds), and your resume + job description.
-- **Hotkeys** — rebind any shortcut.
+- **Overlay & Audio** — opacity, hide-from-screen-share, the **echo gate**
+  (keep on with speakers), the background chunk length, and the speech threshold.
+- **Hotkeys** — rebind show / hide.
 
 Presets in "Add provider" list **free-tier** options only (Gemini, Groq,
 OpenRouter). Paid providers (OpenAI, Anthropic) are added via **Custom…** —

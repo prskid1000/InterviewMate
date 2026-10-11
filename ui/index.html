@@ -35,7 +35,9 @@
   .card.error .a { color: var(--err); }
   footer { padding: 10px 16px; background: var(--panel); border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
   #recRow { display: flex; align-items: center; gap: 14px; }
-  #recBtn { font-size: 16px; font-weight: 700; padding: 12px 28px; border-radius: 12px; border: 2px solid var(--accent); background: rgba(79,142,247,.12); min-width: 260px; }
+  #recBtn { font-size: 16px; font-weight: 700; padding: 12px 28px; border-radius: 12px; border: 2px solid var(--accent); background: rgba(79,142,247,.12); min-width: 170px; }
+  #answerBtn { font-weight: 700; border-color: var(--accent); }
+  button:disabled { opacity: .4; cursor: default; }
   #recBtn.rec { border-color: var(--rec); background: rgba(229,72,77,.15); animation: pulse 1.2s infinite; }
   @keyframes pulse { 50% { box-shadow: 0 0 0 6px rgba(229,72,77,.12); } }
   #timer { font-variant-numeric: tabular-nums; font-size: 18px; color: var(--dim); min-width: 60px; }
@@ -68,9 +70,12 @@
 
 <footer>
   <div id="recRow">
-    <button id="recBtn">● Start recording</button>
+    <button id="recBtn">▶ Listen</button>
+    <button id="answerBtn" title="Send everything since the last answer">Answer</button>
+    <button id="improveBtn" title="Improve what you said since the last answer">Improve</button>
+    <button id="cancelBtn" title="Cancel the answer" disabled>✕ Cancel</button>
     <span id="timer">0:00</span>
-    <span class="hint">Space = start/stop&nbsp;·&nbsp;captures interviewer (system audio) + you (mic)</span>
+    <span id="pending" class="hint"></span>
     <span id="status">…</span>
   </div>
   <div id="manualRow">
@@ -82,7 +87,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let ws, recording = false, recT0 = 0, timerIv = null;
+let ws, listening = false, recT0 = 0, timerIv = null;
 const cards = {}; // qid -> {card, a, raw}
 
 function connect() {
@@ -131,12 +136,17 @@ function handle(m) {
       sel.value = m.active_profile;
       $("transcript").innerHTML = "";
       (m.transcript || []).forEach(t => addTranscript(t.speaker, t.text));
-      setRec(m.recording);
+      setRec(m.listening);
+      $("cancelBtn").disabled = !m.answering;
       break;
     }
     case "status": setStatus(m.text, m.level === "error"); break;
     case "devices": break;
-    case "recording": setRec(m.on); break;
+    case "state":
+      if (m.listening !== listening) setRec(m.listening);
+      $("cancelBtn").disabled = !m.answering;
+      $("pending").textContent = m.pending ? `transcribing ${m.pending}…` : "";
+      break;
     case "transcript": addTranscript(m.speaker, m.text); break;
     case "answer_start": {
       const card = document.createElement("div"); card.className = "card";
@@ -163,10 +173,10 @@ function handle(m) {
 }
 
 function setRec(on) {
-  recording = on;
+  listening = on;
   const b = $("recBtn");
   b.className = on ? "rec" : "";
-  b.textContent = on ? "■ Stop → get answer" : "● Start recording";
+  b.textContent = on ? "■ Stop" : "▶ Listen";
   clearInterval(timerIv);
   if (on) {
     recT0 = Date.now();
@@ -177,7 +187,10 @@ function setRec(on) {
   } else $("timer").textContent = "0:00";
 }
 
-$("recBtn").onclick = () => send({ type: recording ? "record_stop" : "record_start" });
+$("recBtn").onclick = () => send({ type: "listen", on: !listening });
+$("answerBtn").onclick = () => send({ type: "answer" });
+$("improveBtn").onclick = () => send({ type: "improve" });
+$("cancelBtn").onclick = () => send({ type: "cancel" });
 $("clearBtn").onclick = () => send({ type: "clear" });
 $("profile").onchange = e => send({ type: "set_profile", name: e.target.value });
 function sendManual(kind) {
@@ -189,12 +202,6 @@ function sendManual(kind) {
 $("askBtn").onclick = () => sendManual("ask");
 $("sayBtn").onclick = () => sendManual("say");
 $("manualText").addEventListener("keydown", e => { if (e.key === "Enter") sendManual("ask"); });
-document.addEventListener("keydown", e => {
-  if (e.code === "Space" && document.activeElement !== $("manualText")) {
-    e.preventDefault();
-    $("recBtn").click();
-  }
-});
 
 connect();
 </script>

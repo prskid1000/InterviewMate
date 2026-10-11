@@ -6,6 +6,7 @@ Channels:
                    meeting app is playing: Google Meet, Zoom, Teams, anything)
 """
 import threading
+import time
 
 import numpy as np
 import pyaudiowpatch as pyaudio
@@ -74,7 +75,12 @@ class AudioEngine:
             t.start()
 
     def stop(self):
+        # readers first: closing a stream while a thread is inside read() is an
+        # access violation in PortAudio (it crashed the app on ■ Stop)
         self.running = False
+        for t in self.threads:
+            if t.is_alive():
+                t.join(timeout=1.0)
         for s in self.streams:
             try:
                 s.stop_stream(); s.close()
@@ -85,6 +91,12 @@ class AudioEngine:
     def _reader(self, channel, stream, rate, ch, frames):
         while self.running:
             try:
+                # never block in read(): WASAPI loopback delivers NOTHING while the
+                # output is silent, so a blocking read could sit there forever and
+                # stop() could never safely close the stream
+                if stream.get_read_available() < frames:
+                    time.sleep(0.005)
+                    continue
                 data = stream.read(frames, exception_on_overflow=False)
             except Exception:
                 if self.running:

@@ -1,15 +1,28 @@
 """FastAPI server + orchestrator.
 
-Flow (always-on, dual-channel):
-  Both channels are continuously VAD-segmented and transcribed live, in
-  parallel (loopback=interviewer, mic=me), by whichever speech engine `stt`
-  selects — VoxType's API or our own Whisper (see stt.make_stt). Transcription
-  is IDENTICAL in manual and auto mode — the only difference is WHEN we send to
-  the LLM: auto = when the interviewer finishes a question; manual = when you
-  hit the hotkey. History records YOUR actual spoken response as the answer of
-  record, so follow-ups stay grounded in what you really said.
+Manual flow (buttons on the HUD / browser UI):
+  ▶ Listen  opens the mic ("candidate") and the WASAPI loopback ("interviewer").
+            Each channel's audio is cut every `audio.chunk_seconds` at its
+            quietest point and transcribed in the background, so the work is
+            mostly done before you ask. Nothing is sent to the LLM yet.
+  Answer    closes the current turn: both channels' remaining audio is cut and
+            transcribed, every chunk of the turn is merged by the time it was
+            spoken ("Interviewer: … / Me: …") and sent; the answer streams back.
+            Listening carries on — the next turn starts at that moment.
+  Improve   same, but asks to improve what *I* said.
+  Cancel    aborts the answer (closes the provider's HTTP stream).
+  ■ Stop    closes both devices; audio already captured still belongs to the
+            open turn, so Answer after Stop works.
+
+Threads: two audio readers → per-channel chunk buffers (`_cap_lock`) → one
+STT worker per channel → ONE turn-manager thread that owns turns, the
+transcript and history (`_mq`), so nothing races over conversation state.
+With speakers the mic hears the interviewer, so the mic is gated while the
+loopback is loud (`audio.echo_gate`) and "me" lines that repeat the
+interviewer are dropped.
 """
 import asyncio
+import difflib
 import json
 import queue
 import threading
@@ -27,7 +40,12 @@ from .stt import make_stt, voxtype_probe
 
 app = FastAPI()
 
-MIN_SAMPLES = 8000  # ignore channel buffers shorter than 0.5 s
+SR = 16000
+MIN_SAMPLES = 8000          # a chunk shorter than 0.5 s isn't worth transcribing
+CUT_WINDOW_SEC = 4.0        # cut a background chunk at the quietest frame in its last 4 s
+GATE_HOLD_SEC = 0.3         # echo gate: mic stays muted this long after the loopback quiets
+TRIM_PAD_SEC = 0.25         # silence kept around speech when trimming a chunk
+KEEPALIVE_SEC = 120         # < telecode's 150 s idle unload, so a local model stays warm
 
 # Whisper hallucinates these on near-silence; ignore segments that are only these.
 _FILLER = {"you", "and", "the", "uh", "um", "umm", "hmm", "mm", "so", "okay", "ok",
@@ -42,6 +60,34 @@ def _meaningful(text: str) -> bool:
     words = [w.strip(".,!?;:'\"-").lower() for w in t.split()]
     content = [w for w in words if w and w not in _FILLER]
     return sum(len(w) for w in content) >= 3
+
+
+def _words(text: str) -> list[str]:
+    return [w.strip(".,!?;:'\"-").lower() for w in (text or "").split() if w.strip(".,!?;:'\"-")]
+
+
+def _is_echo(me: str, interviewer_texts) -> bool:
+    """A "me" line that mostly repeats something the interviewer said — the mic
+    picking the speakers up (the gate can't catch every edge)."""
+    mw = _words(me)
+    if len(mw) < 3:
+        return False
+    for it in interviewer_texts:
+        iw = _words(it)
+        if not iw:
+            continue
+        sm = difflib.SequenceMatcher(None, mw, iw, autojunk=False)
+        covered = sum(b.size for b in sm.get_matching_blocks())
+        if covered / len(mw) >= 0.6:
+            return True
+    return False
+
+
+def _rms_frames(audio: np.ndarray, frame: int = 480) -> np.ndarray:
+    n = len(audio) // frame
+    if n == 0:
+        return np.array([float(np.sqrt(np.mean(audio ** 2)))]) if len(audio) else np.zeros(0)
+    return np.sqrt(np.mean(audio[: n * frame].reshape(n, frame) ** 2, axis=1))
 
 
 class Copilot:
@@ -61,28 +107,32 @@ class Copilot:
         self.stt = None
         self._stt_error = None      # why STT failed to init, if it did
         self.audio = None
+        self._read_audio_cfg()
 
-        a = CFG.get("audio", {}) or {}
-        self.max_rec = int(a.get("max_record_seconds", 180))
-        self.auto_silence = bool(a.get("auto_silence", False))   # auto-send vs manual send
-        self.silence_seconds = float(a.get("silence_seconds", 1.2))
-        self.speech_threshold = float(a.get("speech_threshold", 0.02))
-        self.min_words = 3                       # ignore filler blips as questions
-
-        # two parallel STT engines, one per channel
+        # one STT backend per channel (the built-in model is shared between them)
         self.stt_int = None
         self.stt_me = None
         self._stt_cfg_key = None    # detects a real STT settings change
         self._failing_over = False  # one VoxType→local swap at a time
         self._q_int: queue.Queue = queue.Queue()
         self._q_me: queue.Queue = queue.Queue()
-        # per-channel VAD segmenter state
-        self._seg = {"interviewer": {"buf": [], "speaking": False, "last": 0.0},
-                     "candidate":  {"buf": [], "speaking": False, "last": 0.0}}
-        self._cur_q = ""        # latest interviewer question
-        self._cur_resp = ""     # my response accumulated since that question
-        self._last_q = ""       # de-dupe auto triggers
-        self.recording = True   # continuous listening (kept name for HUD compat)
+
+        # capture side — touched by the audio reader threads, guarded by _cap_lock
+        self._cap_lock = threading.Lock()
+        self._cap = {"interviewer": {"frames": [], "t0": 0.0},
+                     "candidate":  {"frames": [], "t0": 0.0}}
+        self._turn = 1                       # the open turn's id
+        self._submitted: dict[int, dict[str, int]] = {}   # turn -> channel -> chunks sent to STT
+        self._int_loud_until = 0.0           # echo gate
+        self.listening = False
+
+        # turn manager — the only thread that touches turns, transcript, history
+        self._mq: queue.Queue = queue.Queue()
+        self._lines: dict[int, list] = {}    # turn -> [(t0, speaker, text)]
+        self._received: dict[int, dict[str, int]] = {}
+        self._closing: dict[int, tuple] = {} # turn -> (mode, submitted counts)
+        self._recent_int: deque = deque(maxlen=12)   # interviewer lines, for echo checks
+        self._pending = 0                    # chunks waiting for STT (for the HUD)
 
         # sessions/tabs — each is an independent conversation with its own
         # transcript + exchange history. The active session's context is what
@@ -92,6 +142,14 @@ class Copilot:
         self.active = 0
         self.qid = 0
         self.cancel_event: threading.Event | None = None
+        self.answering = False
+        self._last_llm = 0.0
+
+    def _read_audio_cfg(self):
+        a = CFG.get("audio", {}) or {}
+        self.chunk_sec = max(8.0, min(28.0, float(a.get("chunk_seconds", 20))))
+        self.echo_gate = bool(a.get("echo_gate", True))
+        self.speech_threshold = float(a.get("speech_threshold", 0.02))
 
     def _blank_session(self, title: str | None = None) -> dict:
         self._sid += 1
@@ -117,38 +175,53 @@ class Copilot:
         self.post({"type": "session_activated", "active": self.active,
                    "transcript": list(self.transcript)})
 
-    def _reset_turn(self):
-        """Clear the live turn accumulators (they're not carried across sessions)."""
-        self._cur_q = self._cur_resp = self._last_q = ""
-
+    # session changes run on the manager thread too, so they never interleave
+    # with a turn being composed
     def new_session(self):
-        self.sessions.append(self._blank_session())
-        self.active = len(self.sessions) - 1
-        self._reset_turn()
-        self._post_sessions(); self._post_active()
+        self._mq.put(("call", self._new_session))
 
     def switch_session(self, idx: int):
-        if 0 <= idx < len(self.sessions) and idx != self.active:
-            self.active = idx
-            self._reset_turn()
-            self._post_sessions(); self._post_active()
+        self._mq.put(("call", lambda: self._switch_session(idx)))
 
     def close_session(self, idx: int):
+        self._mq.put(("call", lambda: self._close_session(idx)))
+
+    def clear(self):
+        self._mq.put(("call", self._clear))
+
+    def _new_session(self):
+        self.sessions.append(self._blank_session())
+        self.active = len(self.sessions) - 1
+        self._post_sessions(); self._post_active()
+
+    def _switch_session(self, idx: int):
+        if 0 <= idx < len(self.sessions) and idx != self.active:
+            self.active = idx
+            self._post_sessions(); self._post_active()
+
+    def _close_session(self, idx: int):
         if len(self.sessions) <= 1 or not (0 <= idx < len(self.sessions)):
             return
         self.sessions.pop(idx)
-        self._reset_turn()
         self.active = min(self.active if idx > self.active else self.active - 1,
                           len(self.sessions) - 1)
         self.active = max(0, self.active)
         self._post_sessions(); self._post_active()
+
+    def _clear(self):
+        self.transcript.clear()
+        self.exchanges.clear()
+        self.status("Session cleared — history is empty.")
+        self.post({"type": "cleared"})
 
     # ---------- lifecycle ----------
 
     def startup(self, loop):
         self.loop = loop
         self.events = asyncio.Queue()
-        threading.Thread(target=self._init_backends, daemon=True).start()
+        threading.Thread(target=self._manager, daemon=True, name="turn-manager").start()
+        threading.Thread(target=self._keepalive, daemon=True, name="llm-keepalive").start()
+        threading.Thread(target=self._init_stt, daemon=True, name="stt-init").start()
 
     def post(self, msg: dict):
         if self.loop and self.events is not None:
@@ -162,9 +235,9 @@ class Copilot:
     def status(self, text: str, level: str = "info"):
         self.post({"type": "status", "level": level, "text": text})
 
-    def _init_backends(self):
-        self._init_stt()
-        self._init_audio()
+    def _post_state(self):
+        self.post({"type": "state", "listening": self.listening,
+                   "answering": self.answering, "pending": self._pending})
 
     def _stt_key(self) -> str:
         return json.dumps(CFG.get("stt", {}) or {}, sort_keys=True)
@@ -179,8 +252,8 @@ class Copilot:
     def _init_stt(self):
         """Build both channels' backends — VoxType's API when it's up, otherwise
         our own Whisper (`stt.engine` decides; see stt.make_stt). Safe to call
-        again after a settings change: the segment workers start only once and
-        read the current backend per segment."""
+        again after a settings change: the STT workers start only once and
+        read the current backend per chunk."""
         stt_cfg = CFG.get("stt", {}) or {}
         self._stt_cfg_key = self._stt_key()
         try:
@@ -198,97 +271,141 @@ class Copilot:
         if stt_cfg.get("device", "cuda") == "cuda" and getattr(self.stt_int, "device", "") == "cpu":
             self.status(f"GPU unavailable — using CPU (slow for {stt_cfg.get('model') or 'openai/whisper-large-v3'}). "
                         f"{self.stt_int.fallback_reason}", "error")
-        self._start_seg_workers()
-        mode = "Auto-answer on." if self.auto_silence else "Press the hotkey to ask."
-        self.status(f"Listening — {self._stt_label()}. {mode}")
+        self._start_stt_workers()
+        self.status(f"Ready — {self._stt_label()}. Press ▶ Listen to start.")
 
-    def _start_seg_workers(self):
+    def _start_stt_workers(self):
         if getattr(self, "_workers_up", False):
             return
         self._workers_up = True
-        threading.Thread(target=self._seg_worker, args=("interviewer", self._q_int),
+        threading.Thread(target=self._stt_worker, args=("interviewer", self._q_int),
                          daemon=True, name="stt-interviewer").start()
-        threading.Thread(target=self._seg_worker, args=("candidate", self._q_me),
+        threading.Thread(target=self._stt_worker, args=("candidate", self._q_me),
                          daemon=True, name="stt-candidate").start()
 
-    def _init_audio(self):
+    # ---------- listening (buttons) ----------
+
+    def start_listening(self):
+        if self.listening:
+            return
         try:
             from .audio import AudioEngine
-            a = CFG.get("audio", {})
-            self.audio = AudioEngine(
-                self._on_chunk,
-                capture_mic=a.get("capture_mic", True),
-                capture_system=a.get("capture_system_audio", True),
-            )
+            a = CFG.get("audio", {}) or {}
+            self.audio = AudioEngine(self._on_chunk,
+                                     capture_mic=a.get("capture_mic", True),
+                                     capture_system=a.get("capture_system_audio", True))
             self.audio.start()
-            self.post({"type": "devices", "devices": self.audio.devices, "errors": self.audio.errors})
-            desc = ", ".join(f"{k} = {v}" for k, v in self.audio.devices.items()) or "none"
-            self.status(f"Audio ready — {desc}")
-            for ch, err in self.audio.errors.items():
-                self.status(f"Audio channel '{ch}' unavailable: {err}", "error")
         except Exception as e:
-            self.status(f"Audio capture unavailable: {e}. Manual text input still works.", "error")
+            self.audio = None
+            self.status(f"Audio capture unavailable: {e}. Typed questions still work.", "error")
+            return
+        self.listening = True
+        self.post({"type": "devices", "devices": self.audio.devices, "errors": self.audio.errors})
+        for ch, err in self.audio.errors.items():
+            self.status(f"Audio channel '{ch}' unavailable: {err}", "error")
+        desc = ", ".join(f"{k} = {v}" for k, v in self.audio.devices.items()) or "no devices"
+        self.status(f"Listening — {desc}. Press Answer when you want help.")
+        self._post_state()
+        threading.Thread(target=self._warm_llm, daemon=True, name="llm-warmup").start()
 
-    # ---------- continuous listening ----------
+    def stop_listening(self):
+        if not self.listening:
+            return
+        self.listening = False
+        aud, self.audio = self.audio, None
+        if aud is not None:
+            aud.stop()
+        with self._cap_lock:                 # what was heard still belongs to the turn
+            for ch in self._cap:
+                self._cut(ch, at_quiet=False)
+        self.levels_me.clear(); self.levels_int.clear()
+        self.status("Stopped listening. Answer still uses what was captured.")
+        self._post_state()
 
-    def _seg_len(self, buf) -> int:
-        return sum(len(b) for b in buf)
+    def toggle_listening(self):
+        self.stop_listening() if self.listening else self.start_listening()
 
     def _on_chunk(self, channel: str, samples: np.ndarray):
-        """Called from each audio reader thread. Updates live meters and runs a
-        per-channel VAD segmenter; completed speech segments go to that
-        channel's transcription worker. Identical in manual and auto mode."""
-        rms = float(np.sqrt(np.mean(samples ** 2)))
-        lvl = min(1.0, rms * 14.0)
-        if channel == "candidate":
-            self.levels_me.append(lvl)
-        elif channel == "interviewer":
-            self.levels_int.append(lvl)
-
-        st = self._seg.get(channel)
-        if st is None or self.stt_int is None:   # models not loaded yet
-            return
-        q = self._q_int if channel == "interviewer" else self._q_me
+        """Audio reader threads. Meters, echo gate, and the per-channel chunk
+        buffer (cut in the background every `chunk_sec`)."""
+        lvl = min(1.0, float(np.sqrt(np.mean(samples ** 2))) * 14.0)
         now = time.time()
-        speech = lvl >= self.speech_threshold
-        if speech:
-            st["speaking"] = True
-            st["last"] = now
-            st["buf"].append(samples)
-        elif st["speaking"]:
-            st["buf"].append(samples)               # keep trailing silence
-            if now - st["last"] > self.silence_seconds:
-                self._flush_segment(channel, st, q)
-        # safety cap so one long stretch still gets transcribed
-        if st["speaking"] and self._seg_len(st["buf"]) > 16000 * self.max_rec:
-            self._flush_segment(channel, st, q)
+        if channel == "interviewer":
+            self.levels_int.append(lvl)
+            if lvl >= self.speech_threshold:
+                self._int_loud_until = now + GATE_HOLD_SEC
+        else:
+            self.levels_me.append(lvl)
+            if self.echo_gate and now < self._int_loud_until:
+                samples = np.zeros_like(samples)   # the mic is hearing the speakers
+        if not self.listening:
+            return
+        with self._cap_lock:
+            cb = self._cap[channel]
+            if not cb["frames"]:
+                cb["t0"] = now - len(samples) / SR
+            cb["frames"].append(samples)
+            if sum(len(f) for f in cb["frames"]) >= self.chunk_sec * SR:
+                self._cut(channel, at_quiet=True)
 
-    def _flush_segment(self, channel, st, q):
-        buf = st["buf"]
-        st["buf"] = []
-        st["speaking"] = False
-        if self._seg_len(buf) >= MIN_SAMPLES:
-            q.put(np.concatenate(buf))
+    def _cut(self, channel: str, at_quiet: bool):
+        """Send the channel's buffered audio to STT as one chunk of the open
+        turn. `at_quiet` cuts at the quietest frame of the last few seconds (so
+        a word isn't split) and keeps the rest buffered. Caller holds _cap_lock."""
+        cb = self._cap[channel]
+        frames = cb["frames"]
+        if not frames:
+            return
+        k = len(frames)
+        if at_quiet:
+            lo = max(0, k - int(CUT_WINDOW_SEC * SR / max(1, len(frames[-1]))))
+            rms = [float(np.sqrt(np.mean(f ** 2))) for f in frames[lo:]]
+            k = lo + int(np.argmin(rms)) + 1
+        chunk, rest = frames[:k], frames[k:]
+        audio = np.concatenate(chunk)
+        t0 = cb["t0"]
+        cb["frames"] = rest
+        cb["t0"] = t0 + len(audio) / SR
+        sub = self._submitted.setdefault(self._turn, {"interviewer": 0, "candidate": 0})
+        sub[channel] += 1
+        self._pending += 1
+        (self._q_int if channel == "interviewer" else self._q_me).put((self._turn, t0, audio))
+        self._post_state()
 
-    def _seg_worker(self, channel: str, q: queue.Queue):
-        """One per channel — transcribes completed segments in parallel. The
-        backend is looked up per segment so a settings change or a VoxType
-        failover swaps engines without restarting the thread."""
+    def _stt_worker(self, channel: str, q: queue.Queue):
+        """One per channel. Every chunk produces exactly one result (possibly
+        empty) so the turn manager can tell when a turn is fully transcribed."""
         while True:
-            audio = q.get()
-            if audio is None:
-                return
+            turn, t0, audio = q.get()
+            text = ""
+            trimmed, lead = self._trim_silence(audio)
+            t0 += lead                       # order lines by when speech began, not the chunk
             stt = self.stt_int if channel == "interviewer" else self.stt_me
-            if stt is None:              # engine reloading / failed to build
-                continue
-            try:
-                text = stt.transcribe(audio)
-            except Exception as e:
-                self.status(f"Transcription failed — {e}", "error")
-                self._maybe_failover(stt)
-                continue
-            if _meaningful(text):        # drop blank / filler / silence hallucinations
-                self._on_segment(channel, text)
+            if trimmed is not None and stt is not None:
+                try:
+                    text = stt.transcribe(trimmed)
+                except Exception as e:
+                    self.status(f"Transcription failed — {e}", "error")
+                    self._maybe_failover(stt)
+            elif trimmed is not None:
+                self.status(f"Speech model not ready — {self._stt_error or 'loading…'}", "error")
+            self._mq.put(("text", channel, turn, t0, (text or "").strip()))
+
+    def _trim_silence(self, audio: np.ndarray):
+        """(speech, seconds of leading silence cut). Speech is None if the chunk
+        has none at all (Whisper invents "Thank you." on silence)."""
+        if len(audio) < MIN_SAMPLES:
+            return None, 0.0
+        lv = _rms_frames(audio) * 14.0
+        loud = np.flatnonzero(lv >= self.speech_threshold)
+        if loud.size == 0:
+            return None, 0.0
+        pad = int(TRIM_PAD_SEC * SR / 480)
+        a = max(0, loud[0] - pad) * 480
+        b = min(len(audio), (loud[-1] + 1 + pad) * 480)
+        out = audio[a:b]
+        out = out if len(out) >= MIN_SAMPLES else np.pad(out, (0, MIN_SAMPLES - len(out)))
+        return out, a / SR
 
     def _maybe_failover(self, stt):
         """engine=auto and VoxType vanished mid-interview (app closed, engine
@@ -315,46 +432,129 @@ class Copilot:
             # we're now running something other than what `stt` asks for, so let
             # the next Save & Apply re-select (picks VoxType up again if it's back)
             self._stt_cfg_key = None
-            self.status(f"Listening — {self._stt_label()}.")
+            self.status(f"Transcribing with {self._stt_label()}.")
         except Exception as e:
             self._stt_error = str(e)
             self.status(f"Built-in speech model failed to load: {e}", "error")
         finally:
             self._failing_over = False
 
-    def _on_segment(self, channel: str, text: str):
-        if channel == "interviewer":
-            self._add_transcript("interviewer", text)
-            # a new question closes the previous turn — record MY real answer
-            if self._cur_q and self._cur_resp.strip():
-                self.exchanges.append({"q": self._cur_q, "a": self._cur_resp.strip(),
-                                       "qd": self._cur_q})
-            self._cur_q = text
-            self._cur_resp = ""
-            # auto mode: send as soon as the interviewer finishes (with guardrails)
-            if self.auto_silence and len(text.split()) >= self.min_words and text != self._last_q:
-                self._last_q = text
-                self._trigger_answer()
-        else:  # candidate — this is what I actually say; context, not a trigger
-            self._add_transcript("me", text)
-            self._cur_resp = (self._cur_resp + " " + text).strip()
-
-    def _trigger_answer(self):
-        """Send the current turn (interviewer question + my response so far) to
-        the LLM. Called automatically in auto mode and by the hotkey in manual."""
-        if self.stt_int is None:
-            self.status(f"Speech model not ready — {self._stt_error or 'loading…'}", "error")
-            return
-        # don't send on a blank/filler turn (e.g. first press in a new session)
-        if not (_meaningful(self._cur_q) or _meaningful(self._cur_resp)):
-            self.status("Nothing to send yet — waiting for the interviewer's question.")
-            return
-        self.answer(self._cur_q, self._cur_resp)
+    # ---------- turns (buttons) ----------
 
     def ask_now(self):
-        """Manual trigger (hotkey / status-dot). Recording never stops; this
-        only controls WHEN we send to the LLM."""
-        self._trigger_answer()
+        self.close_turn("answer")
+
+    def improve(self):
+        self.close_turn("improve")
+
+    def close_turn(self, mode: str):
+        """Answer / Improve: cut both channels and close the open turn; the
+        manager sends it once every chunk of it is transcribed."""
+        with self._cap_lock:
+            for ch in self._cap:
+                self._cut(ch, at_quiet=False)
+            turn = self._turn
+            self._turn += 1
+            sub = dict(self._submitted.pop(turn, {"interviewer": 0, "candidate": 0}))
+        self._mq.put(("close", turn, mode, sub))
+
+    def cancel(self):
+        if self.cancel_event:
+            self.cancel_event.set()
+
+    # ---------- turn manager (single owner of conversation state) ----------
+
+    def _manager(self):
+        while True:
+            ev = self._mq.get()
+            try:
+                kind = ev[0]
+                if kind == "text":
+                    self._on_text(*ev[1:])
+                elif kind == "close":
+                    _, turn, mode, sub = ev
+                    self._closing[turn] = (mode, sub)
+                    self._try_finish()
+                elif kind == "say":          # typed in the browser UI
+                    _, speaker, text, turn = ev
+                    self._add_transcript(speaker, text)
+                    self._lines.setdefault(turn, []).append((time.time(), speaker, text))
+                    if speaker == "interviewer":
+                        self._recent_int.append(text)
+                elif kind == "call":
+                    ev[1]()
+            except Exception as e:           # never let one bad event kill the manager
+                self.status(f"Internal error: {e}", "error")
+
+    def typed(self, speaker: str, text: str):
+        """A line typed in the browser UI joins the open turn like speech does
+        (turn id taken now, before an Answer can close it)."""
+        with self._cap_lock:
+            turn = self._turn
+        self._mq.put(("say", speaker, text, turn))
+
+    def _on_text(self, channel: str, turn: int, t0: float, text: str):
+        with self._cap_lock:
+            self._pending = max(0, self._pending - 1)
+        rec = self._received.setdefault(turn, {"interviewer": 0, "candidate": 0})
+        rec[channel] += 1
+        if _meaningful(text):
+            if channel == "interviewer":
+                self._recent_int.append(text)
+                self._lines.setdefault(turn, []).append((t0, "interviewer", text))
+                self._add_transcript("interviewer", text)
+            elif not _is_echo(text, self._recent_int):
+                self._lines.setdefault(turn, []).append((t0, "me", text))
+                self._add_transcript("me", text)
+        self._post_state()
+        self._try_finish()
+
+    def _try_finish(self):
+        """Send closed turns, oldest first, once all their chunks are back."""
+        for turn in sorted(self._closing):
+            mode, sub = self._closing[turn]
+            rec = self._received.get(turn, {"interviewer": 0, "candidate": 0})
+            if any(rec.get(ch, 0) < n for ch, n in sub.items()):
+                self.status("Transcribing the last few seconds…")
+                return                       # keep order: later turns wait
+            del self._closing[turn]
+            self._received.pop(turn, None)
+            lines = sorted(self._lines.pop(turn, []))
+            # a "me" line can arrive before the interviewer line it echoes
+            ints = [t for _, sp, t in lines if sp == "interviewer"]
+            lines = [ln for ln in lines if ln[1] != "me" or not _is_echo(ln[2], ints)]
+            self._send_turn(mode, lines)
+
+    @staticmethod
+    def _render_lines(lines) -> str:
+        out, last = [], None
+        for _, sp, text in lines:
+            who = "Interviewer" if sp == "interviewer" else "Me"
+            if out and who == last:
+                out[-1] += " " + text
+            else:
+                out.append(f"{who}: {text}")
+            last = who
+        return "\n".join(out)
+
+    def _send_turn(self, mode: str, lines):
+        convo = self._render_lines(lines)
+        said_me = any(sp == "me" for _, sp, _ in lines)
+        if mode == "improve":
+            if not said_me:
+                self.status("Nothing from you since the last answer — say something first, "
+                            "or press Answer.")
+                return
+            ask = ("Improve what I said — fix mistakes, fill gaps, make it stronger. "
+                   "Give me the improved version to say now.")
+        else:
+            if not convo:
+                self.status("Nothing captured since the last answer.")
+                return
+            ask = ("Give me what to say now. If I already started answering, continue and "
+                   "improve it rather than repeating it.")
+        user = f"Conversation since my last answer:\n{convo}\n\n{ask}"
+        self.answer(user, convo, mode)
 
     def _add_transcript(self, speaker: str, text: str):
         if not text:
@@ -365,31 +565,15 @@ class Copilot:
 
     # ---------- answering ----------
 
-    def answer(self, qtext: str, atext: str):
+    def answer(self, user: str, convo: str, mode: str = "answer"):
         if self.cancel_event:
             self.cancel_event.set()
         cancel = self.cancel_event = threading.Event()
         self.qid += 1
-        threading.Thread(
-            target=self._answer, args=(self.qid, qtext, atext, cancel), daemon=True
-        ).start()
+        threading.Thread(target=self._answer, args=(self.qid, user, convo, mode, cancel),
+                         daemon=True, name="llm-answer").start()
 
-    @staticmethod
-    def _build_user_msg(qtext: str, atext: str) -> str:
-        parts = []
-        if qtext:
-            parts.append(f"Interviewer asked: {qtext}")
-        if atext:
-            parts.append(f"My answer attempt (what I actually said): {atext}")
-        if qtext and not atext:
-            parts.append("I have not answered yet — give me the answer to speak.")
-        elif qtext and atext:
-            parts.append("Improve/complete my answer — what should I say now?")
-        elif atext:
-            parts.append("Based on what I said, how should I strengthen or continue it?")
-        return "\n".join(parts)
-
-    def _answer(self, qid: int, qtext: str, atext: str, cancel: threading.Event):
+    def _system_prompt(self):
         self.profiles = profiles_mod.list_profiles()  # pick up prompt edits live
         prof = self.profiles.get(self.active_profile)
         if prof:
@@ -402,39 +586,71 @@ class Copilot:
         persona = (CFG.get("persona") or "").strip()
         if persona:
             system += "\n\n--- RESPONSE STYLE (persona) ---\n" + persona
+        return system, temp
+
+    def _answer(self, qid: int, user: str, convo: str, mode: str, cancel: threading.Event):
+        system, temp = self._system_prompt()
         msgs = [{"role": "system", "content": system}]
         n = int(CFG.get("llm", {}).get("history_exchanges", 12))
-        for ex in self.exchanges[-n:]:
+        exchanges = list(self.exchanges)
+        for ex in exchanges[-n:]:
             msgs.append({"role": "user", "content": ex["q"]})
             msgs.append({"role": "assistant", "content": ex["a"] or "(no suggestion given)"})
-        user = self._build_user_msg(qtext, atext)
         msgs.append({"role": "user", "content": user})
 
-        self.post({"type": "answer_start", "qid": qid, "question": qtext or atext})
+        self.answering = True
+        self._post_state()
+        self.post({"type": "answer_start", "qid": qid, "mode": mode,
+                   "question": convo.splitlines()[-1] if convo else ""})
         acc = []
+        stream = self.chain.stream(msgs, temperature=temp)
         try:
-            for provider, delta in self.chain.stream(msgs, temperature=temp):
+            for provider, delta in stream:
                 if cancel.is_set():
                     break
                 acc.append(delta)
                 self.post({"type": "answer_delta", "qid": qid, "text": delta, "provider": provider})
         except Exception as e:
             self.post({"type": "answer_error", "qid": qid, "text": str(e)})
-        self.post({"type": "answer_done", "qid": qid})
-        # persist the AI message into the session log (for rebuild on tab switch);
-        # no display event — the overlay already streamed this bubble live.
+        finally:
+            stream.close()                   # cancel → the provider's HTTP stream is dropped
+            self._last_llm = time.time()
+        cancelled = cancel.is_set()
+        self.post({"type": "answer_done", "qid": qid, "cancelled": cancelled})
+        if self.cancel_event is cancel:
+            self.answering = False
+            self._post_state()
         ai_text = "".join(acc).strip()
         if ai_text:
-            self.transcript.append({"speaker": "ai", "text": ai_text, "ts": time.time()})
-        # NB: conversation *history* (for follow-up context) is recorded in
-        # _on_segment using MY actual spoken response, not this AI suggestion.
+            if cancelled:
+                ai_text += " …(cancelled)"
+            # history: this turn's conversation → the suggestion I was given
+            self._mq.put(("call", lambda: self._record(convo, ai_text)))
 
-    def clear(self):
-        self.transcript.clear()
-        self.exchanges.clear()
-        self._cur_q = self._cur_resp = self._last_q = ""
-        self.status("Session cleared — history is empty.")
-        self.post({"type": "cleared"})
+    def _record(self, convo: str, ai_text: str):
+        self.transcript.append({"speaker": "ai", "text": ai_text, "ts": time.time()})
+        self.exchanges.append({"q": convo, "a": ai_text})
+
+    # ---------- keeping a local model warm ----------
+
+    def _warm_llm(self):
+        """1-token request on ▶ Listen: a cold local model (telecode loads in
+        minutes) loads now, not on the first Answer."""
+        try:
+            stream = self.chain.stream([{"role": "user", "content": "hi"}], max_tokens=1)
+            for _ in stream:
+                break
+            stream.close()
+            self._last_llm = time.time()
+        except Exception:
+            pass                             # the real Answer reports provider errors
+
+    def _keepalive(self):
+        while True:
+            time.sleep(15)
+            if (self.listening and not self.answering
+                    and time.time() - self._last_llm > KEEPALIVE_SEC):
+                self._warm_llm()
 
     def apply_settings(self):
         """Re-read CFG after the settings window saves: rebuild the LLM chain,
@@ -447,14 +663,10 @@ class Copilot:
         p = CFG.get("profile")
         if p in self.profiles:
             self.active_profile = p
-        a = CFG.get("audio", {}) or {}
-        self.max_rec = int(a.get("max_record_seconds", 180))
-        self.auto_silence = bool(a.get("auto_silence", False))
-        self.silence_seconds = float(a.get("silence_seconds", 1.2))
-        self.speech_threshold = float(a.get("speech_threshold", 0.02))
+        self._read_audio_cfg()
         # rebuild STT only if its config changed, or if it's currently down /
         # failed over (a local model load is slow, so never do it speculatively)
-        # — off-thread, the segment workers stay up
+        # — off-thread, the STT workers stay up
         if self.stt_int is None or self._stt_key() != self._stt_cfg_key:
             threading.Thread(target=self._init_stt, daemon=True, name="stt-rebuild").start()
         self.status("Settings applied.")
@@ -495,25 +707,28 @@ async def ws_endpoint(ws: WebSocket):
         "profiles": [{"id": k, "name": v["name"]} for k, v in CO.profiles.items()],
         "active_profile": CO.active_profile,
         "providers": CO.chain.available(),
-        "recording": CO.recording,
+        "listening": CO.listening,
+        "answering": CO.answering,
         "transcript": CO.transcript[-200:],
     }, ensure_ascii=False))
     try:
         while True:
             m = json.loads(await ws.receive_text())
             t = m.get("type")
-            if t in ("record_start", "record_stop", "ask_now"):
-                CO.ask_now()   # continuous listening; this just sends to the LLM
-            elif t == "ask":  # manual: interviewer's question typed in
+            if t == "listen":
+                CO.start_listening() if m.get("on", True) else CO.stop_listening()
+            elif t == "answer":
+                CO.ask_now()
+            elif t == "improve":
+                CO.improve()
+            elif t == "cancel":
+                CO.cancel()
+            elif t in ("ask", "say"):        # typed: interviewer's question / what I said
                 text = (m.get("text") or "").strip()
                 if text:
-                    CO._add_transcript("interviewer", text)
-                    CO.answer(text, "")
-            elif t == "say":  # manual: what I said / want to say
-                text = (m.get("text") or "").strip()
-                if text:
-                    CO._add_transcript("me", text)
-                    CO.answer("", text)
+                    CO.typed("interviewer" if t == "ask" else "me", text)
+                    if t == "ask":
+                        CO.ask_now()
             elif t == "set_profile":
                 name = m.get("name")
                 CO.profiles = profiles_mod.list_profiles()  # pick up edits on disk

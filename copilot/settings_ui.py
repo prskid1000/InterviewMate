@@ -40,7 +40,7 @@ LLM_PRESETS = {
     # local first: telecode's dual-protocol proxy in front of llama.cpp. Costs
     # nothing, no quota, and the chain skips it in ~0.4 s when it isn't running,
     # so it's safe to leave at the top with a cloud provider underneath.
-    "Telecode local (llama.cpp)": ("anthropic", "http://127.0.0.1:1235", "qwen3.6-35b"),
+    "Telecode local (llama.cpp)": ("anthropic", "http://127.0.0.1:1235", "claude-sonnet-5"),
     "Gemini (free)": ("openai", "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.5-flash-lite"),
     "Groq (free)": ("openai", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
     "OpenRouter (free)": ("openai", "https://openrouter.ai/api/v1", "meta-llama/llama-3.3-70b-instruct:free"),
@@ -52,11 +52,9 @@ STT_PRESETS = {
     "Custom…": ("openai", "", ""),
 }
 
-HK_ACTIONS = [("record_toggle", "Ask AI now (send to LLM)"),
-              ("open_config", "Open settings window"),
-              ("toggle_answer", "Show / hide answer card"),
-              ("toggle_hud", "Show / hide HUD palette"),
-              ("quit", "Quit the app")]
+# Everything else (listen, answer, improve, cancel, settings, quit) is a HUD
+# button or menu item — the one global hotkey just shows / hides the overlay.
+HK_ACTIONS = [("toggle_hud", "Show / hide the overlay")]
 
 _MODS = {"ctrl_l": "ctrl", "ctrl_r": "ctrl", "alt_l": "alt", "alt_r": "alt",
          "alt_gr": "alt", "shift": "shift", "shift_l": "shift", "shift_r": "shift",
@@ -668,17 +666,19 @@ class SettingsWindow(QWidget):
         hint.setProperty("class", "row_help"); hint.setWordWrap(True); ob.addWidget(hint)
         lay.addWidget(oc)
 
-        ac, ab = _card("Auto-record", "detect speech and record hands-free")
-        self.auto_silence = QCheckBox("Auto start/stop recording on silence detection")
-        ab.addWidget(self.auto_silence)
-        self.silence_secs = QDoubleSpinBox()
-        self.silence_secs.setRange(0.4, 5.0); self.silence_secs.setSingleStep(0.1); self.silence_secs.setDecimals(1)
-        ab.addWidget(_row("Silence gap (s)", self.silence_secs,
-                          "How long a pause ends a turn and triggers transcription."))
+        ac, ab = _card("Listening", "manual: ▶ Listen, then Answer / Improve when you want help")
+        self.echo_gate = QCheckBox("Echo gate — mute my mic while the interviewer is talking "
+                                   "(needed on speakers, harmless on headphones)")
+        ab.addWidget(self.echo_gate)
+        self.chunk_secs = QSpinBox(); self.chunk_secs.setRange(8, 28); self.chunk_secs.setSuffix(" s")
+        ab.addWidget(_row("Background chunk", self.chunk_secs,
+                          "While listening, audio is transcribed in chunks this long so Answer only "
+                          "waits for the last few seconds. Max 28 (Whisper's window is 30)."))
         self.silence_sens = QDoubleSpinBox()
         self.silence_sens.setRange(0.005, 0.20); self.silence_sens.setSingleStep(0.005); self.silence_sens.setDecimals(3)
         ab.addWidget(_row("Speech threshold", self.silence_sens,
-                          "Level above which audio counts as speech. Lower = more sensitive."))
+                          "Level above which audio counts as speech — used to trim silence and for the "
+                          "echo gate. Lower = more sensitive."))
         lay.addWidget(ac); lay.addStretch(1)
         return scroll
 
@@ -773,8 +773,8 @@ class SettingsWindow(QWidget):
         self.opacity.setValue(float(ov.get("opacity", 1.0)))
         self.hide_capture.setChecked(bool(ov.get("exclude_from_capture", True)))
         au = CFG.get("audio", {}) or {}
-        self.auto_silence.setChecked(bool(au.get("auto_silence", False)))
-        self.silence_secs.setValue(float(au.get("silence_seconds", 1.2)))
+        self.echo_gate.setChecked(bool(au.get("echo_gate", True)))
+        self.chunk_secs.setValue(int(au.get("chunk_seconds", 20)))
         self.silence_sens.setValue(float(au.get("speech_threshold", 0.02)))
 
         # profiles → in-memory model {id: {name, body, temp, files}}
@@ -856,8 +856,8 @@ class SettingsWindow(QWidget):
                       "repetition_penalty": round(self.stt_rep.value(), 2),
                       "initial_prompt": self.stt_prompt.text().strip()}
         cfg["audio"] = {**(CFG.get("audio", {}) or {}),
-                        "auto_silence": self.auto_silence.isChecked(),
-                        "silence_seconds": round(self.silence_secs.value(), 1),
+                        "echo_gate": self.echo_gate.isChecked(),
+                        "chunk_seconds": self.chunk_secs.value(),
                         "speech_threshold": round(self.silence_sens.value(), 3)}
 
         save_config(cfg)

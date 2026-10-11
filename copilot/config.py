@@ -33,18 +33,19 @@ DEFAULT_CONFIG = {
             "task": "transcribe", "num_beams": 1, "temperature": 0.0,
             "repetition_penalty": 1.0, "initial_prompt": ""},
     "overlay": {"enabled": True, "exclude_from_capture": True, "opacity": 1.0},
-    "hotkeys": {
-        "record_toggle": "ctrl+space", "open_config": "ctrl+alt+c",
-        "toggle_answer": "ctrl+alt+h", "toggle_hud": "ctrl+alt+b", "quit": "ctrl+alt+q",
-    },
+    # the only global hotkey — everything else is a HUD button
+    "hotkeys": {"toggle_hud": "ctrl+alt+b"},
+    # manual flow: ▶ Listen opens mic + loopback; audio is transcribed in the
+    # background in chunk_seconds pieces; Answer / Improve cut the turn.
+    # echo_gate mutes the mic while the interviewer talks (speakers).
     "audio": {
-        "capture_mic": True, "capture_system_audio": True, "max_record_seconds": 180,
-        "auto_silence": False, "silence_seconds": 1.2, "speech_threshold": 0.02,
+        "capture_mic": True, "capture_system_audio": True,
+        "chunk_seconds": 20, "echo_gate": True, "speech_threshold": 0.02,
     },
     "llm": {
         "providers": [
             {"name": "Telecode local (llama.cpp)", "api_type": "anthropic",
-             "base_url": "http://127.0.0.1:1235", "model": "qwen3.6-35b",
+             "base_url": "http://127.0.0.1:1235", "model": "claude-sonnet-5",
              "api_key": "local", "enabled": True},
         ],
         "history_exchanges": 12, "max_tokens": 900, "temperature": 0.4,

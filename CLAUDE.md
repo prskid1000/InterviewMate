@@ -6,8 +6,9 @@ Guidance for AI coding agents (and humans) working in this repo.
 
 A Windows real-time interview assistant. Captures the interviewer (WASAPI
 system-audio loopback) and the user (mic) on two channels, transcribes both on
-manual start/stop, and streams an AI-suggested answer into a frameless desktop
-overlay. No system-tray icon; controlled by a HUD + global hotkeys + a native
+demand, and streams an AI-suggested answer into a frameless desktop
+overlay. No system-tray icon; controlled by HUD buttons (one global hotkey
+only shows / hides it) + a native
 settings window. Free-provider-first, but any OpenAI-/Anthropic-compatible
 endpoint can be added.
 
@@ -28,9 +29,9 @@ python -m venv .venv
 
 | File | Responsibility |
 |------|----------------|
-| `main.py` | Entry point. Starts uvicorn in a thread, builds the Qt app, HUD, settings window, and the global-hotkey listener (`build_hotkeys()` re-registers on rebind). |
-| `server.py` | `Copilot` core + FastAPI. Multiple **sessions** (tabs) — `transcript`/`exchanges` are properties proxying the active session; `new_/switch_/close_session` post `sessions`/`session_activated` events. Recording buffers, transcription, prompt assembly (profile + per-profile context block + persona + history), the answer stream, optional **auto-silence** VAD in `_on_chunk`, and the `/ws` websocket. `apply_settings()` hot-reloads config and rebuilds STT off-thread only if the `stt` block actually changed. The two `_seg_worker` threads start **once** (`_start_seg_workers`) and re-read `stt_int`/`stt_me` per segment, so engines can be swapped under them — that's what `_maybe_failover` does when VoxType dies mid-session under `engine: auto`. |
-| `overlay.py` | ONE merged, all-edge-resizable window: `Hud` paints the top BAR (status glyph + two vertical-bar equalizer meters + a settings gear at the right — the BAR has no child widgets, so its controls are painted glyphs with click zones tested in `mouseReleaseEvent`: `_gear_rect()` → `_open_settings`, `x < 52` → ask now) and hosts `SessionTabs` + `AnswerView` (the streamed answer) below it. Capture-hidden + opacity from `overlay.*`; geometry/visibility/collapse persisted. Subscribes to `Copilot.listeners` via a Qt `Signal`. |
+| `main.py` | Entry point. Starts uvicorn in a thread, builds the Qt app, HUD, settings window, and the global-hotkey listener — only `toggle_hud` (`build_hotkeys()` re-registers on rebind). |
+| `server.py` | `Copilot` core + FastAPI. Multiple **sessions** (tabs) — `transcript`/`exchanges` are properties proxying the active session; `new_/switch_/close_session` post `sessions`/`session_activated` events. The manual flow (see "Listening / turns" below), prompt assembly (profile + per-profile context block + persona + history), the answer stream, and the `/ws` websocket. `apply_settings()` hot-reloads config and rebuilds STT off-thread only if the `stt` block actually changed. The two `_stt_worker` threads start **once** (`_start_stt_workers`) and re-read `stt_int`/`stt_me` per chunk, so engines can be swapped under them — that's what `_maybe_failover` does when VoxType dies mid-session under `engine: auto`. |
+| `overlay.py` | ONE merged, all-edge-resizable window: `Hud` paints the top BAR (status glyph + two vertical-bar equalizer meters + a settings gear at the right — the BAR has no child widgets; the gear is a painted glyph with a click zone, `_gear_rect()` → `_open_settings`) and hosts `Controls` (▶ Listen / ■ Stop, Answer, Improve, ✕ — always visible, driven by the `state` event), `SessionTabs` and `AnswerView` (the streamed answer) below it. Capture-hidden + opacity from `overlay.*`; geometry/visibility/collapse persisted. Subscribes to `Copilot.listeners` via a Qt `Signal`. |
 | `settings_ui.py` | Native `SettingsWindow` (sidebar + pages — `SECTIONS` order must match the builder tuple in `_build`), `ProviderEditor` (the custom-provider list, now used by AI Model only), the **Speech** page (`_page_speech`: engine combo + VoxType URL/Test + built-in model), hotkey capture. |
 | `llm.py` | `ProviderChain` — user-defined chat providers. Supports `openai` (OpenAI SDK, streaming) and `anthropic` (Anthropic SDK, `messages.stream`). No hardcoded providers. Entries on a local host are flagged `local` → TCP-preflighted by `local_endpoint_up()` and skipped fast when dark, and their clients get `timeout=90, max_retries=0`. |
 | `stt.py` | `make_stt(cfg, on_status)` picks the engine from `stt.engine`: **`voxtype`** (`VoxTypeSTT` → VoxType's embedded OpenAI server, default `127.0.0.1:6600`) or **`local`** (`LocalSTT`, a port of VoxType's transformers `_WhisperHandler` — same HF cache and knobs, large-v3 on CUDA fp16, CPU fp32 fallback; long-form path for >30 s; both channels share one instance via `_shared_local`). `auto` = VoxType if `voxtype_probe()` says it's up, else local. Prefer VoxType — its Whisper is already resident on the GPU, so we skip a second copy in VRAM and the startup load. `SttChain` + the cloud `openai`/`gemini` classes are legacy, not offered in the UI. |
@@ -115,12 +116,39 @@ current turn (question + the user's spoken attempt). History makes deep
 follow-ups coherent; the persona controls tone/format/length/language on top of
 whatever profile is active.
 
+## Listening / turns (`server.py`)
+
+Manual and button-driven — nothing reaches the LLM on its own.
+
+- **▶ Listen** opens `AudioEngine` (mic = `candidate`, loopback = `interviewer`)
+  and fires a 1-token LLM warm-up; `_keepalive` repeats it every 120 s while
+  listening (telecode unloads its model after 150 s idle and takes minutes to
+  reload). **■ Stop** closes the devices; captured audio stays in the turn.
+- `_on_chunk` (reader threads): meters, the **echo gate** (`audio.echo_gate`:
+  mic frames are zeroed while the loopback was loud in the last 0.3 s — speakers),
+  and the per-channel buffer, cut by `_cut` every `audio.chunk_seconds` (≤ 28 s,
+  Whisper's window) at the quietest frame of the last 4 s. Chunks carry the
+  turn id and their start time.
+- `_stt_worker` trims silence (an all-silent chunk is never sent to Whisper),
+  transcribes, and always reports one result per chunk — so the manager knows
+  when a turn is complete. A line's timestamp = when speech **began** in the
+  chunk (both channels stream silence too, so chunk start says nothing).
+- **Answer / Improve** (`close_turn`) cut both channels and close the turn; the
+  **turn manager** thread (`_manager`, the single owner of turns, transcript,
+  sessions and history — other threads post to `_mq`) waits for every chunk of
+  that turn, sorts lines by time, drops "me" lines that repeat the interviewer
+  (`_is_echo`), and sends `Interviewer: … / Me: …` + the ask. History stores
+  (that conversation → the AI suggestion).
+- **Cancel** closes the provider stream (`ProviderChain.stream` closes the SDK
+  stream in `finally`), so a local model stops generating.
+- HUD/browser state comes from the `state` event `{listening, answering, pending}`.
+
 ## Threading / events
 
 - `Copilot` runs recording + STT + LLM on worker threads.
 - It publishes events via `self.post(msg)` → asyncio queue (websocket) **and**
   `self.listeners` (the overlay's `event_sig.emit`, marshalled to the Qt thread).
-- Hotkey callbacks fire on the pynput thread → they call `*_threadsafe()` which
+- The hotkey callback fires on the pynput thread → it calls `toggle_hud_threadsafe()` which
   emits `ui_sig` so UI work happens on the Qt thread. Never touch widgets from a
   worker/pynput thread directly.
 

@@ -1,6 +1,6 @@
 """Entry point: FastAPI server in a background thread + Qt overlay in the
-main thread. No system tray icon — the pill's right-click menu and the
-global hotkeys from config.yaml are the only chrome."""
+main thread. No system tray icon — the HUD's buttons and right-click menu are
+the chrome; the one global hotkey (hotkeys.toggle_hud) shows / hides it."""
 import os
 import sys
 import threading
@@ -76,16 +76,11 @@ def main():
                 pass
             _hk["listener"] = None
         hk = CFG.get("hotkeys", {}) or {}
-        actions = {
-            "record_toggle": hud.toggle_record_threadsafe,
-            "open_config": hud.toggle_settings_threadsafe,
-            "toggle_answer": hud.toggle_answer_threadsafe,
-            "toggle_hud": hud.toggle_hud_threadsafe,
-            "quit": lambda: os._exit(0),
-        }
+        # everything else is a HUD button — older configs' other keys are ignored
+        actions = {"toggle_hud": hud.toggle_hud_threadsafe}
         mapping = {}
         for action, fn in actions.items():
-            combo = hk.get(action) or (hk.get("hide_answer") if action == "toggle_answer" else None)
+            combo = hk.get(action)
             if combo:
                 try:
                     mapping[_to_pynput(combo)] = fn
@@ -100,7 +95,8 @@ def main():
     build_hotkeys()
     settings.on_hotkeys_changed = build_hotkeys
 
-    print("Overlay running. Click the HUD status dot to record; right-click for the menu.")
+    # ASCII only: a cp1252 console can't encode ▶ and the print would kill startup
+    print("Overlay running. Press Listen on the HUD to start; right-click for the menu.")
     app.exec()
     os._exit(0)
 
