@@ -1,9 +1,9 @@
 """Dark QSS for the settings window — palette + card/sidebar patterns
 adapted from voxtype's qt_theme.py."""
-BG, BG_ELEV, BG_CARD, BG_ROW, BG_HOVER = "#0c0f14", "#10141c", "#151a24", "#1a2030", "#1d2334"
-FG, FG_DIM, FG_MUTE = "#e6ebf2", "#8a96aa", "#4f5a70"
-ACCENT, ACCENT_2, OK = "#6ba4ff", "#56e0c2", "#56e0c2"
-BORDER, BORDER_SOFT = "#1e2636", "#171d28"
+BG, BG_ELEV, BG_CARD, BG_ROW, BG_HOVER = "#0c0c0c", "#121412", "#171a17", "#1e231e", "#232a23"
+FG, FG_DIM, FG_MUTE = "#dde3dc", "#8a968a", "#566156"
+ACCENT, ACCENT_2, OK = "#8fbf7f", "#9fd48c", "#9fd48c"
+BORDER, BORDER_SOFT = "#252b25", "#1b1f1b"
 
 QSS = f"""
 * {{ color: {FG}; font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
@@ -49,16 +49,16 @@ QPushButton.collapse:hover {{ color: {FG}; }}
 
 /* Provider row */
 QFrame.prow {{ background: {BG_ROW}; border: 1px solid {BORDER}; border-radius: 8px; }}
-QFrame.prow:hover {{ border: 1px solid #2c3a52; }}
+QFrame.prow:hover {{ border: 1px solid #344434; }}
 
 /* Inputs */
 QLineEdit, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{
-    background: #0d1118; border: 1px solid {BORDER}; border-radius: 6px;
+    background: #0f110f; border: 1px solid {BORDER}; border-radius: 6px;
     padding: 6px 9px; selection-background-color: {ACCENT}; selection-color: {BG};
     min-height: 18px; }}
 QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {{ border: 1px solid {ACCENT}; }}
 QComboBox {{
-    background: #0d1118; border: 1px solid {BORDER}; border-radius: 6px;
+    background: #0f110f; border: 1px solid {BORDER}; border-radius: 6px;
     padding: 6px 26px 6px 9px; min-height: 18px; }}
 QComboBox:hover, QComboBox:focus {{ border: 1px solid {ACCENT}; }}
 QComboBox::drop-down {{ border: none; width: 22px; }}
@@ -72,7 +72,7 @@ QComboBox QAbstractItemView {{
 /* Checkboxes / switches */
 QCheckBox {{ spacing: 8px; font-size: 12.5px; }}
 QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid {BORDER};
-    border-radius: 4px; background: #0d1118; }}
+    border-radius: 4px; background: #0f110f; }}
 QCheckBox::indicator:hover {{ border: 1px solid {ACCENT}; }}
 QCheckBox::indicator:checked {{ background: {ACCENT}; border: 1px solid {ACCENT}; }}
 
@@ -82,15 +82,15 @@ QPushButton {{ background: {BG_ROW}; border: 1px solid {BORDER}; border-radius: 
 QPushButton:hover {{ border: 1px solid {ACCENT}; background: {BG_HOVER}; }}
 QPushButton:disabled {{ color: {FG_MUTE}; }}
 QPushButton.primary {{ background: {ACCENT}; color: {BG}; border: 1px solid {ACCENT}; font-weight: 600; }}
-QPushButton.primary:hover {{ background: #7db0ff; }}
+QPushButton.primary:hover {{ background: #a3cc93; }}
 QPushButton.iconbtn {{ background: transparent; border: none; color: {FG_DIM};
     font-size: 15px; padding: 2px 8px; min-height: 16px; }}
 QPushButton.iconbtn:hover {{ color: {FG}; background: {BG_HOVER}; border-radius: 6px; }}
 
 /* Scrollbars */
 QScrollBar:vertical {{ background: {BG_ELEV}; width: 11px; margin: 2px 0; border: none; }}
-QScrollBar::handle:vertical {{ background: #3a4563; border-radius: 5px; min-height: 24px; }}
-QScrollBar::handle:vertical:hover {{ background: #5b6a92; }}
+QScrollBar::handle:vertical {{ background: #3a4d3a; border-radius: 5px; min-height: 24px; }}
+QScrollBar::handle:vertical:hover {{ background: #647c64; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 
 QToolTip {{ background: {BG_CARD}; border: 1px solid {BORDER}; color: {FG}; padding: 4px 8px; }}

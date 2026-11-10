@@ -169,9 +169,9 @@ class ProviderEditor(QWidget):
     def _add_menu(self):
         menu = QMenu(self)
         menu.setStyleSheet(
-            "QMenu{background:#151a24;border:1px solid #1e2636;border-radius:8px;padding:6px;"
-            "color:#e6ebf2;font-size:12.5px;}QMenu::item{padding:6px 18px;border-radius:5px;}"
-            "QMenu::item:selected{background:#1a2030;}")
+            "QMenu{background:#171a17;border:1px solid #252b25;border-radius:8px;padding:6px;"
+            "color:#dde3dc;font-size:12.5px;}QMenu::item{padding:6px 18px;border-radius:5px;}"
+            "QMenu::item:selected{background:#1e231e;}")
         for label in self.presets:
             act = menu.addAction(label)
             act.triggered.connect(lambda _=False, l=label: self._add_preset(l))
@@ -412,21 +412,21 @@ class SettingsWindow(QWidget):
         bl.addWidget(self._sidebar); bl.addWidget(self._stack, 1)
         root.addWidget(body, 1)
 
-        foot = QWidget(); foot.setStyleSheet("background:#10141c;border-top:1px solid #171d28;")
+        foot = QWidget(); foot.setStyleSheet("background:#121412;border-top:1px solid #1b1f1b;")
         # one row, every control the same 32 px height and vertically centred:
         # [hotkey label + key] ......... [status] [Close] [Save & Apply]
         fl = QHBoxLayout(foot); fl.setContentsMargins(18, 10, 18, 10); fl.setSpacing(10)
         mid = Qt.AlignmentFlag.AlignVCenter
         fl.addWidget(self._hotkey_widget(), 0, mid)   # the one hotkey — no tab for a single item
-        self.status_lbl = QLabel(""); self.status_lbl.setStyleSheet("color:#56e0c2;font-size:11.5px;font-weight:600;")
+        self.status_lbl = QLabel(""); self.status_lbl.setStyleSheet("color:#9fd48c;font-size:11.5px;font-weight:600;")
         self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | mid)
         fl.addWidget(self.status_lbl, 1, mid)
         btn_css = ("QPushButton{{background:{bg};color:{fg};font-weight:{w};border:1px solid {bd};"
                    "border-radius:6px;padding:0 18px;}}QPushButton:hover{{background:{hv};}}")
         close = QPushButton("Close"); close.setCursor(Qt.CursorShape.PointingHandCursor); close.clicked.connect(self.hide)
-        close.setStyleSheet(btn_css.format(bg="transparent", fg="#dce6f7", w=600, bd="#2a3446", hv="#161c28"))
+        close.setStyleSheet(btn_css.format(bg="transparent", fg="#d8e2d6", w=600, bd="#2c362c", hv="#191c19"))
         save = QPushButton("Save && Apply"); save.setCursor(Qt.CursorShape.PointingHandCursor)
-        save.setStyleSheet(btn_css.format(bg="#6ba4ff", fg="#0c0f14", w=700, bd="#6ba4ff", hv="#7db0ff"))
+        save.setStyleSheet(btn_css.format(bg="#8fbf7f", fg="#0c0c0c", w=700, bd="#8fbf7f", hv="#a3cc93"))
         save.clicked.connect(self._save)
         for b in (close, save):
             b.setFixedHeight(32)
@@ -649,7 +649,7 @@ class SettingsWindow(QWidget):
         url = self.stt_vox_url.text().strip() or "http://127.0.0.1:6600"
         ok, detail = voxtype_probe(url)
         self.stt_vox_status.setText(("✓ Reachable — " if ok else "✗ Not reachable — ") + detail)
-        self.stt_vox_status.setStyleSheet(f"color:{'#56e0c2' if ok else '#ff8080'};font-size:11.5px;")
+        self.stt_vox_status.setStyleSheet(f"color:{'#9fd48c' if ok else '#dc9089'};font-size:11.5px;")
 
     def _page_behavior(self):
         scroll, lay = _page()
@@ -693,14 +693,14 @@ class SettingsWindow(QWidget):
         mid = Qt.AlignmentFlag.AlignVCenter
         self._hk_buttons = {}
         for action, label in HK_ACTIONS:
-            a = QLabel(label); a.setStyleSheet("color:#8a96aa;font-size:11.5px;")
+            a = QLabel(label); a.setStyleSheet("color:#8a968a;font-size:11.5px;")
             btn = QPushButton("—")
             btn.setToolTip("Global hotkey — works while the meeting window is focused. "
                            "Click, then press the new combo (Esc cancels).")
             btn.setStyleSheet(
-                "QPushButton{background:#0d1118;border:1px solid #1e2636;border-radius:6px;"
-                "color:#6ba4ff;font-family:Consolas,monospace;font-size:11.5px;font-weight:700;"
-                "padding:0 10px;}QPushButton:hover{border:1px solid #6ba4ff;}")
+                "QPushButton{background:#0f110f;border:1px solid #252b25;border-radius:6px;"
+                "color:#8fbf7f;font-family:Consolas,monospace;font-size:11.5px;font-weight:700;"
+                "padding:0 10px;}QPushButton:hover{border:1px solid #8fbf7f;}")
             btn.setFixedHeight(32)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _=False, ac=action: self._start_capture(ac))

@@ -58,8 +58,8 @@ _ACCENT = {
 def _md_html(s: str) -> str:
     s = html.escape(s)
     s = re.sub(r"```\w*\n([\s\S]*?)(?:```|$)",
-               r'<pre style="background:#10141a;padding:8px;border-radius:6px;">\1</pre>', s)
-    s = re.sub(r"`([^`\n]+)`", r'<code style="background:#10141a;">\1</code>', s)
+               r'<pre style="background:#101210;padding:8px;border-radius:6px;">\1</pre>', s)
+    s = re.sub(r"`([^`\n]+)`", r'<code style="background:#101210;">\1</code>', s)
     s = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)
     out, in_ul = [], False
     for ln in s.split("\n"):
@@ -87,9 +87,9 @@ class AnswerView(QWidget):
     _MAXW = 0.82   # bubble max width as a fraction of the viewport
     # speaker -> (tag, tag color, bubble bg, right-aligned?)
     _ROLES = {
-        "interviewer": ("INTERVIEWER", "#f2b84b", "rgba(242,184,75,0.13)", False),
-        "me":          ("YOU",         "#34d89e", "rgba(52,201,142,0.15)", True),
-        "ai":          ("AI",          "#a78bfa", "rgba(167,139,250,0.14)", False),
+        "interviewer": ("INTERVIEWER", "#e0ce8a", "rgba(224,206,138,0.13)", False),
+        "me":          ("YOU",         "#9fd48c", "rgba(159,212,140,0.15)", True),
+        "ai":          ("AI",          "#c495d4", "rgba(196,149,212,0.14)", False),
     }
 
     def __init__(self):
@@ -102,7 +102,7 @@ class AnswerView(QWidget):
 
         self._hdr = QLabel("Live transcript")
         self._hdr.setStyleSheet(
-            "color:#5b6a86; font:600 10px 'Segoe UI'; letter-spacing:0.06em; background:transparent;")
+            "color:#5e6b5e; font:600 10px 'Segoe UI'; letter-spacing:0.06em; background:transparent;")
         lay.addWidget(self._hdr)
 
         self._status = QLabel()
@@ -124,7 +124,7 @@ class AnswerView(QWidget):
         self._scroll.setStyleSheet(
             "QScrollArea{background:transparent;}"
             "QScrollBar:vertical{background:transparent;width:8px;}"
-            "QScrollBar::handle:vertical{background:#3a4563;border-radius:4px;min-height:24px;}"
+            "QScrollBar::handle:vertical{background:#3a4d3a;border-radius:4px;min-height:24px;}"
             "QScrollBar::add-line,QScrollBar::sub-line{height:0;}")
         self._scroll.viewport().setStyleSheet("background:transparent;")
         lay.addWidget(self._scroll, 1)
@@ -153,7 +153,7 @@ class AnswerView(QWidget):
         body = QLabel()
         body.setWordWrap(True)
         body.setTextFormat(Qt.TextFormat.RichText if rich else Qt.TextFormat.PlainText)
-        body.setStyleSheet("color:#e7edf6; font:13px 'Segoe UI'; background:transparent;")
+        body.setStyleSheet("color:#dfe5de; font:13px 'Segoe UI'; background:transparent;")
         body.setText(_md_html(text) if rich else text)
         bv.addWidget(tag); bv.addWidget(body)
         if right:
@@ -193,7 +193,7 @@ class AnswerView(QWidget):
         self.set_status("")
         self._ai_raw = ""
         self._ai_tag, self._ai_body = self._make_bubble("ai", "", rich=True)
-        self._ai_body.setText("<i style='color:#8a96aa'>thinking…</i>")
+        self._ai_body.setText("<i style='color:#8a968a'>thinking…</i>")
         self._render.start()
         self._scroll_bottom()
 
@@ -207,7 +207,7 @@ class AnswerView(QWidget):
         self._render.stop()
         if self._ai_body is not None:
             self._ai_body.setText(_md_html(self._ai_raw)
-                                  or "<i style='color:#8a96aa'>(no answer)</i>")
+                                  or "<i style='color:#8a968a'>(no answer)</i>")
         self._ai_body = self._ai_tag = None
         self._scroll_bottom()
 
@@ -251,7 +251,7 @@ class AnswerView(QWidget):
         if not text:
             self._status.setVisible(False)
             return
-        color = "#f87171" if error else "#8a96aa"
+        color = "#dc9089" if error else "#8a968a"
         self._status.setStyleSheet(
             f"color:{color}; font:{'600 ' if error else ''}11px 'Segoe UI'; background:transparent;")
         self._status.setText(text)
@@ -264,7 +264,7 @@ class SessionTabs(QWidget):
 
     _TAB = ("QPushButton{{background:{bg};color:{fg};border:1px solid {bd};"
             "border-radius:7px;padding:3px 10px;font:600 11px 'Segoe UI';}}"
-            "QPushButton:hover{{border:1px solid #6ba4ff;}}")
+            "QPushButton:hover{{border:1px solid #8fbf7f;}}")
 
     def __init__(self, on_switch, on_new, on_close):
         super().__init__()
@@ -283,9 +283,9 @@ class SessionTabs(QWidget):
         closable = len(sessions) > 1
         for i, s in enumerate(sessions):
             on = (i == active)
-            bg = "#1b2740" if on else "rgba(255,255,255,0.04)"
-            fg = "#dce6f7" if on else "#8a96aa"
-            bd = "#3a568c" if on else "#232c3a"
+            bg = "#233023" if on else "rgba(255,255,255,0.04)"
+            fg = "#d8e2d6" if on else "#8a968a"
+            bd = "#4e624e" if on else "#262d26"
             # tab = title button (+ a small × to close, when >1 session)
             wrap = QWidget()
             wl = QHBoxLayout(wrap); wl.setContentsMargins(0, 0, 0, 0); wl.setSpacing(0)
@@ -297,7 +297,7 @@ class SessionTabs(QWidget):
                 f"QPushButton{{background:{bg};color:{fg};border:1px solid {bd};{rad}"
                 f"border-right:{'1px' if not closable else '0'} solid {bd};"
                 "padding:3px 10px;font:600 11px 'Segoe UI';}"
-                "QPushButton:hover{color:#dce6f7;}")
+                "QPushButton:hover{color:#d8e2d6;}")
             tab.clicked.connect(lambda _=False, k=i: self._on_switch(k))
             wl.addWidget(tab)
             if closable:
@@ -305,17 +305,17 @@ class SessionTabs(QWidget):
                 x.setCursor(Qt.CursorShape.PointingHandCursor)
                 x.setToolTip("Close session")
                 x.setStyleSheet(
-                    f"QPushButton{{background:{bg};color:#7c8aa5;border:1px solid {bd};border-left:0;"
+                    f"QPushButton{{background:{bg};color:#7e8a7e;border:1px solid {bd};border-left:0;"
                     "border-top-right-radius:7px;border-bottom-right-radius:7px;"
                     "padding:3px 7px 3px 3px;font:700 12px 'Segoe UI';}"
-                    "QPushButton:hover{color:#f87171;}")
+                    "QPushButton:hover{color:#dc9089;}")
                 x.clicked.connect(lambda _=False, k=i: self._on_close(k))
                 wl.addWidget(x)
             self._lay.addWidget(wrap)
         plus = QPushButton("＋")
         plus.setCursor(Qt.CursorShape.PointingHandCursor)
         plus.setToolTip("New session")
-        plus.setStyleSheet(self._TAB.format(bg="rgba(255,255,255,0.04)", fg="#8a96aa", bd="#232c3a"))
+        plus.setStyleSheet(self._TAB.format(bg="rgba(255,255,255,0.04)", fg="#8a968a", bd="#262d26"))
         plus.clicked.connect(lambda: self._on_new())
         self._lay.addWidget(plus)
         self._lay.addStretch(1)
@@ -598,11 +598,11 @@ class Hud(ResizableMixin, QWidget):
     def contextMenuEvent(self, e):
         menu = QMenu(self)
         menu.setStyleSheet(
-            "QMenu{background:#151a24;border:1px solid #1e2636;border-radius:8px;"
-            "padding:6px;color:#e6ebf2;font-size:12.5px;font-family:'Segoe UI';}"
+            "QMenu{background:#171a17;border:1px solid #252b25;border-radius:8px;"
+            "padding:6px;color:#dde3dc;font-size:12.5px;font-family:'Segoe UI';}"
             "QMenu::item{padding:7px 22px 7px 12px;border-radius:5px;margin:1px 2px;}"
-            "QMenu::item:selected{background:#1a2030;}"
-            "QMenu::separator{height:1px;background:#1e2636;margin:4px 6px;}")
+            "QMenu::item:selected{background:#1e231e;}"
+            "QMenu::separator{height:1px;background:#252b25;margin:4px 6px;}")
         lis = menu.addAction("Stop listening" if self._listening else "Listen")
         lis.triggered.connect(self.co.toggle_listening)
         menu.addAction("Answer").triggered.connect(self.co.ask_now)
