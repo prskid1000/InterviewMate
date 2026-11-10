@@ -32,6 +32,50 @@ def _to_pynput(combo: str) -> str:
     return "+".join(out)
 
 
+def _set_app_user_model_id(app_id: str) -> None:
+    """Give this process its own taskbar identity. Without it Windows groups
+    the window under pythonw.exe and shows that exe's generic icon."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except Exception:
+        pass
+
+
+def _make_app_icon():
+    """Painted app icon: sage rounded square with a dark speech bubble."""
+    from PySide6.QtCore import QRectF, Qt
+    from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
+
+    icon = QIcon()
+    for size in (16, 24, 32, 48, 64, 128, 256):
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        s = size / 64.0
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#8FBF7F"))
+        p.drawRoundedRect(QRectF(2 * s, 2 * s, 60 * s, 60 * s), 14 * s, 14 * s)
+        bubble = QPainterPath()
+        bubble.addRoundedRect(QRectF(13 * s, 15 * s, 38 * s, 26 * s), 8 * s, 8 * s)
+        tail = QPainterPath()
+        tail.moveTo(20 * s, 39 * s)
+        tail.lineTo(18 * s, 50 * s)
+        tail.lineTo(30 * s, 40 * s)
+        tail.closeSubpath()
+        p.setBrush(QColor("#1E2A1C"))
+        p.drawPath(bubble.united(tail))
+        p.setBrush(QColor("#8FBF7F"))
+        for cx in (23, 32, 41):
+            p.drawEllipse(QRectF((cx - 2.6) * s, 25.4 * s, 5.2 * s, 5.2 * s))
+        p.end()
+        icon.addPixmap(pm)
+    return icon
+
+
 def main():
     server_cfg = CFG.get("server", {})
     host = server_cfg.get("host", "127.0.0.1")
@@ -56,8 +100,12 @@ def main():
     from .settings_ui import SettingsWindow
     from .server import CO
 
+    _set_app_user_model_id("InterviewMate.App")
     app = QApplication([])
+    app.setApplicationName("InterviewMate")
     app.setQuitOnLastWindowClosed(False)
+    # Taskbar / Alt+Tab icon for every window.
+    app.setWindowIcon(_make_app_icon())
 
     hud = Hud(CO, url)
     settings = SettingsWindow(CO)
